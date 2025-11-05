@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-api.py — FastAPI wrapper for website_bot.py (Async Compatible)
+api.py — FastAPI wrapper for website_bot.py (Secure, Env-Safe)
 """
 
-import os, json, asyncio
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from website_bot import scrape_website
 from dotenv import load_dotenv
 
-load_dotenv()  # Load .env automatically
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(title="Website Scraper API")
 
 class ScrapeRequest(BaseModel):
     url: str
-
 
 @app.post("/scrape")
 async def scrape_endpoint(request: ScrapeRequest):
@@ -28,12 +28,11 @@ async def scrape_endpoint(request: ScrapeRequest):
         url = "https://" + url
 
     try:
-        # ✅ call async scrape_website function properly
-        data = await scrape_website(url)
+        # Call scrape_website function (already returns JSON dict)
+        data = scrape_website(url)
         return {"status": "success", "data": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/")
 async def root():
