@@ -1,37 +1,43 @@
-import os, re, json, asyncio, urllib.parse, random
+#!/usr/bin/env python3
+"""
+website_bot.py — Async website scraper + RAG + GPT embedding
+"""
+
+import os, re, json, random, urllib.parse, asyncio
 from typing import Dict
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
-MAX_PAGES = 3
 USE_HEADLESS = True
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 50
+MAX_PAGES = 2  # safe limit to prevent timeout
 
-# ---------------- Helpers ----------------
-def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+# ---------------- Helper functions ----------------
+def clean_text(t: str) -> str:
+    return re.sub(r"\s+", " ", t).strip()
 
-def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
     words = text.split()
     chunks = []
     i = 0
     while i < len(words):
-        chunks.append(" ".join(words[i:i+size]))
+        chunk = words[i:i + size]
+        chunks.append(" ".join(chunk))
         i += size - overlap
     return chunks
 
-def extract_email(text: str):
+def extract_email(text: str) -> str:
     m = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
     return m[0] if m else ""
 
-def extract_phone(text: str):
-    m = re.findall(r"(\+?\d[\d\s\-()]{7,15})", text)
+def extract_phone(text: str) -> str:
+    m = re.findall(r"(\+\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{2,4}[\s\-]?\d{2,4})", text)
     return m[0] if m else ""
 
-def extract_address(text: str):
+def extract_address(text: str) -> str:
     lines = text.splitlines()
     for line in lines:
         if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
@@ -44,7 +50,7 @@ def select_main_pages(urls: list):
     contact = next((u for u in urls if "contact" in u.lower()), "")
     return list(filter(None, [home, about, contact]))
 
-# ---------------- Playwright ----------------
+# ---------------- Async Playwright ----------------
 from playwright.async_api import async_playwright
 
 async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
@@ -67,67 +73,82 @@ async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
 
 async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
     visited, queue = set(), [base_url.rstrip("/")]
+    site_structure = []
     while queue and len(visited) < max_pages:
         url = queue.pop(0)
-        if url in visited:
-            continue
+        if url in visited: continue
         html = await fetch_page(url)
+        site_structure.append(url)
         soup = BeautifulSoup(html, "html.parser")
-        [s.extract() for s in soup(["script","style","noscript"])]
         links = set()
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if href.startswith(("mailto:", "tel:")):
-                continue
+            if href.startswith(("mailto:", "tel:")): continue
             full_url = urllib.parse.urljoin(base_url, href.split("#")[0])
-            if full_url.startswith(base_url):
-                links.add(full_url.rstrip("/"))
+            if full_url.startswith(base_url): links.add(full_url.rstrip("/"))
         for l in links:
-            if l not in visited and l not in queue and len(visited)+len(queue) < max_pages:
+            if l not in visited and l not in queue and len(visited)+len(queue)<max_pages:
                 queue.append(l)
         visited.add(url)
-    return list(visited)
+    return site_structure
 
-# ---------------- OpenAI RAG ----------------
-from openai import OpenAI
+# ---------------- RAG / GPT Extraction ----------------
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    from openai import OpenAI
+except:
+    chromadb = None
+    OpenAI = None
+    embedding_functions = None
+
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-openai_client = OpenAI(api_key=OPENAI_KEY)
+chroma_client = chromadb.Client() if chromadb else None
+openai_client = OpenAI(api_key=OPENAI_KEY) if OpenAI and OPENAI_KEY else None
+openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+    api_key=OPENAI_KEY, model_name="text-embedding-3-small"
+) if embedding_functions and OPENAI_KEY else None
 
-async def rag_extract(chunks: list, url: str) -> dict:
+def rag_extract(chunks, url):
+    if not openai_client or not openai_ef:
+        return None
+    coll = chroma_client.get_or_create_collection(
+        "rag_collection", embedding_function=openai_ef
+    )
+    for i,ch in enumerate(chunks):
+        coll.add(documents=[ch], metadatas=[{"url":url,"chunk":i}], ids=[f"{url}_chunk_{i}"])
+    query = "Extract Business Name, About Us, Main Services, Email, Phone, Address, Social Links, Description, URL"
+    res = coll.query(query_texts=[query], n_results=3)
+    context_text = " ".join(res.get("documents",[[]])[0]) if res else " ".join(chunks[:3])
     prompt = f"""
-You are a professional assistant.
-Extract a strict JSON from the following text.
-Return only JSON with keys:
+You are a data extraction assistant. Extract clean JSON with:
 Business Name, About Us, Main Services (list), Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL.
-
 URL: {url}
-Text: {" ".join(chunks[:5])}
+Text: {context_text}
 """
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role":"user","content":prompt}],
-        temperature=0
+        temperature=0,
+        request_timeout=30
     )
     raw = resp.choices[0].message.content.strip()
     raw = re.sub(r"^```json", "", raw)
     raw = re.sub(r"```$", "", raw)
-    try:
-        return json.loads(raw)
-    except:
-        return {"raw_ai": raw}
+    try: return json.loads(raw)
+    except: return {"raw_ai": raw}
 
-# ---------------- Public Scrape ----------------
+# ---------------- Public Async Scrape ----------------
 async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
-
     all_urls = await crawl_site(site_url, max_pages=MAX_PAGES)
     main_pages = select_main_pages(all_urls)
 
     all_text = ""
     for page_url in main_pages:
         html = await fetch_page(page_url)
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html,"html.parser")
         [s.extract() for s in soup(["script","style","noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))
         all_text += " " + text
@@ -135,21 +156,20 @@ async def scrape_website(site_url: str) -> Dict:
     all_text = clean_text(all_text)
     chunks = chunk_text(all_text)
 
-    data = await rag_extract(chunks, site_url)
+    data = rag_extract(chunks, site_url)
     if not data:
         data = {
-            "Business Name": "",
-            "About Us": "",
-            "Main Services": [],
-            "Email": extract_email(all_text),
-            "Phone": extract_phone(all_text),
-            "Address": extract_address(all_text),
-            "Facebook": "",
-            "Instagram": "",
-            "LinkedIn": "",
-            "Twitter / X": "",
-            "Description": "",
-            "URL": site_url,
+            "Business Name":"",
+            "About Us":"",
+            "Main Services":[],
+            "Email":extract_email(all_text),
+            "Phone":extract_phone(all_text),
+            "Address":extract_address(all_text),
+            "Facebook":"",
+            "Instagram":"",
+            "LinkedIn":"",
+            "Twitter / X":"",
+            "Description":"",
+            "URL":site_url
         }
-
     return data
