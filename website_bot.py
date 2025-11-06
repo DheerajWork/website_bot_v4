@@ -1,45 +1,43 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Core website scraper module (Async, RAG-enabled)
+website_bot.py — Async website scraper with RAG + GPT extraction
 """
 
-import os, re, json, random, urllib.parse, asyncio
+import os, re, json, asyncio, urllib.parse, random
 from typing import Dict
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
-
 # ---------------- Config ----------------
+load_dotenv(override=True)
 USE_HEADLESS = True
-CHUNK_SIZE = 180
-CHUNK_OVERLAP = 30
-MAX_PAGES = 3  # main pages only
-PAGE_TIMEOUT = 60000  # 60s
+CHUNK_SIZE = 300
+CHUNK_OVERLAP = 50
+MAX_PAGES = 3  # Home, About, Contact
 
-# ---------------- Helpers ----------------
-def clean_text(t: str) -> str:
-    return re.sub(r"\s+", " ", t).strip()
+# ---------------- Helper functions ----------------
+def clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
-def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
+def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     words = text.split()
     chunks = []
     i = 0
     while i < len(words):
-        chunk = words[i:i + size]
+        chunk = words[i:i+size]
         chunks.append(" ".join(chunk))
         i += size - overlap
     return chunks
 
-def extract_email(text: str) -> str:
+def extract_email(text: str):
     m = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
     return m[0] if m else ""
 
-def extract_phone(text: str) -> str:
-    m = re.findall(r"(\+\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{2,4}[\s\-]?\d{2,4})", text)
+def extract_phone(text: str):
+    m = re.findall(r"(\+?\d[\d\s\-()]{7,15})", text)
     return m[0] if m else ""
 
-def extract_address(text: str) -> str:
+def extract_address(text: str):
     lines = text.splitlines()
     for line in lines:
         if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
@@ -56,18 +54,17 @@ def select_main_pages(urls: list):
 from playwright.async_api import async_playwright
 
 async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
-    """Load a webpage and return HTML (async)"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(viewport={"width": 1280, "height": 800})
+        context = await browser.new_context(viewport={"width":1280,"height":800})
         page = await context.new_page()
         html = ""
         try:
-            await page.goto(url, timeout=PAGE_TIMEOUT)
-            await asyncio.sleep(2 + random.random() * 2)
+            await page.goto(url, timeout=45000)
+            await asyncio.sleep(2 + random.random()*2)
             html = await page.content()
-        except Exception as e:
-            print(f"⚠️ Failed to fetch {url}: {e}")
+        except Exception:
+            html = ""
         finally:
             await page.close()
             await context.close()
@@ -75,6 +72,7 @@ async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
     return html
 
 async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
+    """Crawl only main pages"""
     visited, queue = set(), [base_url.rstrip("/")]
     site_structure = []
     while queue and len(visited) < max_pages:
@@ -93,20 +91,20 @@ async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
             if full_url.startswith(base_url):
                 links.add(full_url.rstrip("/"))
         for l in links:
-            if l not in visited and l not in queue and len(visited) + len(queue) < max_pages:
+            if l not in visited and l not in queue and len(visited)+len(queue) < max_pages:
                 queue.append(l)
         visited.add(url)
     return site_structure
 
-# ---------------- RAG / OpenAI ----------------
+# ---------------- OpenAI / Chroma ----------------
 try:
     import chromadb
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except Exception:
     chromadb = None
-    OpenAI = None
     embedding_functions = None
+    OpenAI = None
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 chroma_client = chromadb.Client() if chromadb else None
@@ -117,26 +115,30 @@ openai_ef = (
 )
 
 def rag_extract(chunks, url):
-    """Use RAG + GPT to extract structured data"""
     if not openai_client or not openai_ef:
         return None
+
     coll = chroma_client.get_or_create_collection(
-        "three_page_rag_collection", embedding_function=openai_ef
+        "rag_collection", embedding_function=openai_ef
     )
+
     for i, ch in enumerate(chunks):
         coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
-    query = "Extract Business Name, About Us, Main Services, Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL"
+
+    query = "Extract clean JSON: Business Name, About Us, Main Services, Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL"
     res = coll.query(query_texts=[query], n_results=3)
     context_text = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
+
     prompt = f"""
-You are a data extraction assistant. Extract clean JSON with:
+You are a professional data extraction assistant.
+Extract structured JSON with:
 Business Name, About Us, Main Services (list), Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL.
 URL: {url}
 Text: {context_text}
 """
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role":"user","content":prompt}],
         temperature=0
     )
     raw = resp.choices[0].message.content.strip()
@@ -168,6 +170,7 @@ async def scrape_website(site_url: str) -> Dict:
 
     data = rag_extract(chunks, site_url)
     if not data:
+        # fallback
         data = {
             "Business Name": "",
             "About Us": "",
