@@ -4,15 +4,13 @@ website_bot.py
 
 Flow:
 1) Input site URL
-2) Crawl internal links (depth-limited) -> print site structure
+2) Crawl internal links (depth-limited)
 3) Auto-select Home, Contact, About pages
 4) Deep scrape those 3 pages (Playwright)
 5) Chunk scraped text with chunk_size=180 words and overlap=30
 6) Store chunks in ChromaDB using OpenAI embeddings
-7) Run a RAG extraction: retrieve top chunks and call LLM (gpt-3.5-turbo)
+7) Run a RAG extraction (gpt-3.5-turbo)
 8) Print clean JSON output
-
-Cost-saving: Only 3 pages are embedded; embedding model = text-embedding-3-small; LLM model = gpt-3.5-turbo
 """
 
 import os, re, time, json, random, urllib.parse
@@ -27,7 +25,7 @@ load_dotenv(override=True)
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 # ✅ Safe handling of missing key
-if not OPENAI_KEY:
+if not OPENAI_KEY or OPENAI_KEY.strip() == "":
     print("⚠️ Warning: OPENAI_API_KEY missing hai. RAG part skip hoga, basic extraction hi chalega.")
 else:
     os.environ["OPENAI_API_KEY"] = OPENAI_KEY
@@ -36,7 +34,7 @@ USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
 
-# ChromaDB + OpenAI setup
+# ---------------- ChromaDB + OpenAI setup ----------------
 try:
     import chromadb
     from chromadb.utils import embedding_functions
@@ -59,11 +57,11 @@ def clean_text(t):
 def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(viewport={"width":1280,"height":800})
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
         try:
             page.goto(url, timeout=45000)
-            time.sleep(2 + random.random()*2)
+            time.sleep(2 + random.random() * 2)
             html = page.content()
         except Exception:
             html = ""
@@ -97,7 +95,7 @@ def crawl_site(base_url, max_pages=100):
         site_structure.append(url)
         links = extract_links(base_url, html)
         for l in links:
-            if l not in visited and l not in queue and len(visited)+len(queue) < max_pages:
+            if l not in visited and l not in queue and len(visited) + len(queue) < max_pages:
                 queue.append(l)
         visited.add(url)
     return site_structure
@@ -113,7 +111,7 @@ def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
     chunks = []
     i = 0
     while i < len(words):
-        chunk = words[i:i+size]
+        chunk = words[i:i + size]
         chunks.append(" ".join(chunk))
         i += size - overlap
     return chunks
@@ -178,6 +176,7 @@ if __name__ == "__main__":
 
     print("🔍 Crawling site structure...")
     all_urls = crawl_site(site_url, max_pages=100)
+
     print("\nSite structure URLs found:")
     for u in all_urls:
         print(u)
