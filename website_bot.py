@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-"""
-website_bot.py — Async website scraper with RAG + GPT extraction
-"""
-
 import os, re, json, asyncio, urllib.parse, random
 from typing import Dict
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# ---------------- Config ----------------
-load_dotenv(override=True)
-USE_HEADLESS = True
-CHUNK_SIZE = 300
-CHUNK_OVERLAP = 50
-MAX_PAGES = 3  # Home, About, Contact
+load_dotenv()
 
-# ---------------- Helper functions ----------------
+MAX_PAGES = 3
+USE_HEADLESS = True
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 50
+
+# ---------------- Helpers ----------------
 def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -24,8 +19,7 @@ def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     chunks = []
     i = 0
     while i < len(words):
-        chunk = words[i:i+size]
-        chunks.append(" ".join(chunk))
+        chunks.append(" ".join(words[i:i+size]))
         i += size - overlap
     return chunks
 
@@ -50,7 +44,7 @@ def select_main_pages(urls: list):
     contact = next((u for u in urls if "contact" in u.lower()), "")
     return list(filter(None, [home, about, contact]))
 
-# ---------------- Async Playwright ----------------
+# ---------------- Playwright ----------------
 from playwright.async_api import async_playwright
 
 async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
@@ -72,16 +66,14 @@ async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
     return html
 
 async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
-    """Crawl only main pages"""
     visited, queue = set(), [base_url.rstrip("/")]
-    site_structure = []
     while queue and len(visited) < max_pages:
         url = queue.pop(0)
         if url in visited:
             continue
         html = await fetch_page(url)
-        site_structure.append(url)
         soup = BeautifulSoup(html, "html.parser")
+        [s.extract() for s in soup(["script","style","noscript"])]
         links = set()
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
@@ -94,47 +86,22 @@ async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
             if l not in visited and l not in queue and len(visited)+len(queue) < max_pages:
                 queue.append(l)
         visited.add(url)
-    return site_structure
+    return list(visited)
 
-# ---------------- OpenAI / Chroma ----------------
-try:
-    import chromadb
-    from chromadb.utils import embedding_functions
-    from openai import OpenAI
-except Exception:
-    chromadb = None
-    embedding_functions = None
-    OpenAI = None
-
+# ---------------- OpenAI RAG ----------------
+from openai import OpenAI
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-chroma_client = chromadb.Client() if chromadb else None
-openai_client = OpenAI(api_key=OPENAI_KEY) if OpenAI and OPENAI_KEY else None
-openai_ef = (
-    embedding_functions.OpenAIEmbeddingFunction(api_key=OPENAI_KEY, model_name="text-embedding-3-small")
-    if embedding_functions and OPENAI_KEY else None
-)
+openai_client = OpenAI(api_key=OPENAI_KEY)
 
-def rag_extract(chunks, url):
-    if not openai_client or not openai_ef:
-        return None
-
-    coll = chroma_client.get_or_create_collection(
-        "rag_collection", embedding_function=openai_ef
-    )
-
-    for i, ch in enumerate(chunks):
-        coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
-
-    query = "Extract clean JSON: Business Name, About Us, Main Services, Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL"
-    res = coll.query(query_texts=[query], n_results=3)
-    context_text = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
-
+async def rag_extract(chunks: list, url: str) -> dict:
     prompt = f"""
-You are a professional data extraction assistant.
-Extract structured JSON with:
+You are a professional assistant.
+Extract a strict JSON from the following text.
+Return only JSON with keys:
 Business Name, About Us, Main Services (list), Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL.
+
 URL: {url}
-Text: {context_text}
+Text: {" ".join(chunks[:5])}
 """
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
@@ -149,7 +116,7 @@ Text: {context_text}
     except:
         return {"raw_ai": raw}
 
-# ---------------- Public Async Scrape ----------------
+# ---------------- Public Scrape ----------------
 async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
@@ -168,9 +135,8 @@ async def scrape_website(site_url: str) -> Dict:
     all_text = clean_text(all_text)
     chunks = chunk_text(all_text)
 
-    data = rag_extract(chunks, site_url)
+    data = await rag_extract(chunks, site_url)
     if not data:
-        # fallback
         data = {
             "Business Name": "",
             "About Us": "",
@@ -186,5 +152,4 @@ async def scrape_website(site_url: str) -> Dict:
             "URL": site_url,
         }
 
-    print("✅ Scraping complete for:", site_url)
     return data
