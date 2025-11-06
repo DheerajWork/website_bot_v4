@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Core website scraper module (Async, max_pages=10)
+website_bot.py — Core website scraper module (Async, max_pages=3)
 Safe for API import, works with FastAPI + Playwright Async
 """
 
@@ -15,7 +15,7 @@ load_dotenv(override=True)
 USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
-MAX_PAGES = 10  # 🔹 Limit pages to 10 for faster testing
+MAX_PAGES = 3  # 🔹 Limit pages to 3 for cloud/live tests
 
 # ---------------- Helper functions ----------------
 def clean_text(t: str) -> str:
