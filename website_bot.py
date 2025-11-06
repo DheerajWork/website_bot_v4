@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Core website scraper module (Async, max_pages=3)
-Safe for API import, works with FastAPI + Playwright Async
+website_bot.py — Core website scraper module (Async, main pages deep scrape)
 """
 
-import os, re, json, random, urllib.parse, asyncio
-from typing import Dict
+import os, re, json, random, asyncio
+from typing import Dict, List
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from urllib.parse import urljoin
 
 # ---------------- Config ----------------
 load_dotenv(override=True)
@@ -15,7 +15,6 @@ load_dotenv(override=True)
 USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
-MAX_PAGES = 3  # 🔹 Limit pages to 3 for cloud/live tests
 
 # ---------------- Helper functions ----------------
 def clean_text(t: str) -> str:
@@ -46,17 +45,10 @@ def extract_address(text: str) -> str:
             return line.strip()
     return ""
 
-def select_main_pages(urls: list):
-    home = urls[0] if urls else ""
-    about = next((u for u in urls if "about" in u.lower()), "")
-    contact = next((u for u in urls if "contact" in u.lower()), "")
-    return list(filter(None, [home, about, contact]))
-
 # ---------------- Async Playwright ----------------
 from playwright.async_api import async_playwright
 
 async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
-    """Load a webpage and return its HTML (Async)"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context(viewport={"width": 1280, "height": 800})
@@ -74,31 +66,14 @@ async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
             await browser.close()
     return html
 
-async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
-    visited, queue = set(), [base_url.rstrip("/")]
-    site_structure = []
-    while queue and len(visited) < max_pages:
-        url = queue.pop(0)
-        if url in visited:
-            continue
-        print(f"🌐 Visiting: {url}")
-        html = await fetch_page(url)
-        site_structure.append(url)
-        # Extract links
-        soup = BeautifulSoup(html, "html.parser")
-        links = set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            if href.startswith(("mailto:", "tel:")):
-                continue
-            full_url = urllib.parse.urljoin(base_url, href.split("#")[0])
-            if full_url.startswith(base_url):
-                links.add(full_url.rstrip("/"))
-        for l in links:
-            if l not in visited and l not in queue and len(visited) + len(queue) < max_pages:
-                queue.append(l)
-        visited.add(url)
-    return site_structure
+async def fetch_main_pages(base_url: str) -> List[str]:
+    """Return list of main pages URLs (home, about, contact)"""
+    base_url = base_url.rstrip("/")
+    return [
+        base_url + "/", 
+        urljoin(base_url, "/about"), 
+        urljoin(base_url, "/contact")
+    ]
 
 # ---------------- RAG / AI Extraction (Optional) ----------------
 try:
@@ -122,7 +97,7 @@ def rag_extract(chunks, url):
     if not openai_client or not openai_ef:
         return None
     coll = chroma_client.get_or_create_collection(
-        "three_page_rag_collection", embedding_function=openai_ef
+        "main_pages_rag_collection", embedding_function=openai_ef
     )
     for i, ch in enumerate(chunks):
         coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
@@ -141,8 +116,7 @@ Text: {context_text}
         temperature=0
     )
     raw = resp.choices[0].message.content.strip()
-    raw = re.sub(r"^```json", "", raw)
-    raw = re.sub(r"```$", "", raw)
+    raw = raw.replace("```json","").replace("```","")
     try:
         return json.loads(raw)
     except:
@@ -153,12 +127,14 @@ async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
 
-    all_urls = await crawl_site(site_url, max_pages=MAX_PAGES)
-    main_pages = select_main_pages(all_urls)
+    main_pages = await fetch_main_pages(site_url)
+
+    # Parallel fetch of all main pages
+    tasks = [fetch_page(url) for url in main_pages]
+    pages_html = await asyncio.gather(*tasks)
 
     all_text = ""
-    for page_url in main_pages:
-        html = await fetch_page(page_url)
+    for html in pages_html:
         soup = BeautifulSoup(html, "html.parser")
         [s.extract() for s in soup(["script","style","noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))

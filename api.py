@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 api.py — FastAPI wrapper for async website_bot.py
-(Playwright Async compatible, await used for scraping)
+Updated for 3-pages deep scraping with Playwright Async
 """
 
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from website_bot import scrape_website  # async function
+from website_bot import scrape_website  # async 3-page deep scrape
 
 # Load environment variables
 load_dotenv()
@@ -29,11 +30,12 @@ async def scrape_endpoint(request: ScrapeRequest):
         url = "https://" + url
 
     try:
-        # 🔹 Call async scrape_website with await
-        data = await scrape_website(url)
+        # 🔹 Use asyncio.wait_for to prevent infinite hanging (timeout in seconds)
+        data = await asyncio.wait_for(scrape_website(url), timeout=60)
         return {"status": "success", "data": data}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Scraping timed out. Try again later.")
     except Exception as e:
-        # Return full error for debugging if something goes wrong
         raise HTTPException(status_code=500, detail=f"Scraping failed: {str(e)}")
 
 @app.get("/")
