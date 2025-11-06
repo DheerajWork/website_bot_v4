@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Core website scraper module (Async)
+website_bot.py — Core website scraper module (Async, max_pages=10)
 Safe for API import, works with FastAPI + Playwright Async
 """
 
@@ -15,6 +15,7 @@ load_dotenv(override=True)
 USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
+MAX_PAGES = 10  # 🔹 Limit pages to 10 for faster testing
 
 # ---------------- Helper functions ----------------
 def clean_text(t: str) -> str:
@@ -73,7 +74,7 @@ async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
             await browser.close()
     return html
 
-async def crawl_site(base_url: str, max_pages=30) -> list:
+async def crawl_site(base_url: str, max_pages: int = MAX_PAGES) -> list:
     visited, queue = set(), [base_url.rstrip("/")]
     site_structure = []
     while queue and len(visited) < max_pages:
@@ -152,7 +153,7 @@ async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
 
-    all_urls = await crawl_site(site_url, max_pages=30)
+    all_urls = await crawl_site(site_url, max_pages=MAX_PAGES)
     main_pages = select_main_pages(all_urls)
 
     all_text = ""
