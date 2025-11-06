@@ -8,8 +8,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from website_bot import scrape_website
+import asyncio
 
-# Load env
 load_dotenv()
 
 app = FastAPI(title="Website Scraper API")
@@ -22,13 +22,15 @@ async def scrape_endpoint(request: ScrapeRequest):
     url = request.url.strip()
     if not url.startswith("http"):
         url = "https://" + url
-
     try:
-        data = await scrape_website(url)
-        return {"status":"success","data":data}
+        # Timeout-safe async scraping
+        data = await asyncio.wait_for(scrape_website(url), timeout=90)
+        return {"status": "success", "data": data}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Scraping timeout")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scraping failed: {str(e)}")
 
 @app.get("/")
 async def root():
-    return {"message":"✅ Website Scraper API is running!"}
+    return {"message": "✅ Website Scraper API is running fine!"}
