@@ -15,7 +15,6 @@ USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
 MAX_PAGES = 20
-USE_RAG = True  # GPT + RAG extraction
 
 # ---------------- Helper functions ----------------
 def clean_text(t: str) -> str:
@@ -39,36 +38,27 @@ def extract_phone(text: str) -> str:
     m = re.findall(r"(\+\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{2,4}[\s\-]?\d{2,4})", text)
     return m[0] if m else ""
 
-def extract_addresses(text: str) -> Dict:
+def extract_addresses(soup):
     addresses = {}
-    lines = text.splitlines()
-    for line in lines:
-        if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
-            # Simple heuristic: split by city keywords
-            if "San Francisco" in line:
-                addresses["San Francisco"] = line.strip()
-            elif "London" in line:
-                addresses["London"] = line.strip()
-            elif "Singapore" in line:
-                addresses["Singapore"] = line.strip()
+    if not soup:
+        return addresses
+    for div in soup.find_all(['address', 'div', 'p']):
+        text = clean_text(div.get_text(" ", strip=True))
+        if any(ch.isdigit() for ch in text) and len(text.split()) > 5:
+            # Simple heuristic: last word or # part is city code / location
+            key = text.split()[-1] if len(text.split()) < 20 else f"Location_{len(addresses)+1}"
+            addresses[key] = text
     return addresses
-
-def select_main_pages(urls: list):
-    home = urls[0] if urls else ""
-    about = next((u for u in urls if "about" in u.lower()), "")
-    contact = next((u for u in urls if "contact" in u.lower()), "")
-    return list(filter(None, [home, about, contact]))
 
 def extract_services_from_soup(soup):
     services = []
     if not soup:
         return services
-    keywords = ["service", "offer", "provide"]
-    for li in soup.find_all(["li", "p", "div"]):
+    for li in soup.find_all("li"):
         text = clean_text(li.get_text(" ", strip=True))
-        if any(k in text.lower() for k in keywords) and 3 < len(text.split()) < 15:
+        if 2 < len(text.split()) < 12:
             services.append(text)
-    return list(dict.fromkeys(services))  # remove duplicates
+    return services
 
 def extract_social_links(soup):
     socials = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
@@ -76,15 +66,17 @@ def extract_social_links(soup):
         return socials
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if "facebook.com" in href:
-            socials["Facebook"] = href
-        elif "instagram.com" in href:
-            socials["Instagram"] = href
-        elif "linkedin.com" in href:
-            socials["LinkedIn"] = href
-        elif "twitter.com" in href or "x.com" in href:
-            socials["Twitter / X"] = href
+        if "facebook.com" in href: socials["Facebook"] = href
+        if "instagram.com" in href: socials["Instagram"] = href
+        if "linkedin.com" in href: socials["LinkedIn"] = href
+        if "twitter.com" in href or "x.com" in href: socials["Twitter / X"] = href
     return socials
+
+def select_main_pages(urls: list):
+    home = urls[0] if urls else ""
+    about = next((u for u in urls if "about" in u.lower()), "")
+    contact = next((u for u in urls if "contact" in u.lower()), "")
+    return list(filter(None, [home, about, contact]))
 
 # ---------------- Async Playwright ----------------
 from playwright.async_api import async_playwright
@@ -132,72 +124,6 @@ async def crawl_site(base_url: str, max_pages=MAX_PAGES) -> list:
         visited.add(url)
     return site_structure
 
-# ---------------- RAG / GPT ----------------
-try:
-    import chromadb
-    from chromadb.utils import embedding_functions
-    from openai import OpenAI
-except Exception:
-    chromadb = None
-    OpenAI = None
-    embedding_functions = None
-
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-chroma_client = chromadb.Client() if chromadb else None
-openai_client = OpenAI(api_key=OPENAI_KEY) if OpenAI and OPENAI_KEY else None
-openai_ef = (
-    embedding_functions.OpenAIEmbeddingFunction(api_key=OPENAI_KEY, model_name="text-embedding-3-small")
-    if embedding_functions and OPENAI_KEY else None
-)
-
-async def rag_extract(chunks, url):
-    if not openai_client or not openai_ef:
-        return None
-    coll = chroma_client.get_or_create_collection(
-        "three_page_rag_collection", embedding_function=openai_ef
-    )
-    for i, ch in enumerate(chunks):
-        coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
-    query = "Extract structured company info as JSON"
-    res = coll.query(query_texts=[query], n_results=3)
-    context_text = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
-
-    prompt = f"""
-You are a professional data extraction assistant. 
-Extract all company details from the following text and return STRICT JSON ONLY:
-
-Keys: 
-- Business Name
-- About Us
-- Main Services (list)
-- Email
-- Phone
-- Address (if multiple locations, return as JSON with city names as keys)
-- Facebook
-- Instagram
-- LinkedIn
-- Twitter / X
-- Description
-- URL
-
-Text: {context_text}
-URL: {url}
-
-Return ONLY valid JSON, no explanations.
-"""
-    resp = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
-    raw = resp.choices[0].message.content.strip()
-    raw = re.sub(r"^```json", "", raw)
-    raw = re.sub(r"```$", "", raw)
-    try:
-        return json.loads(raw)
-    except:
-        return {"raw_ai": raw}
-
 # ---------------- Public Async Scrape ----------------
 async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
@@ -220,28 +146,17 @@ async def scrape_website(site_url: str) -> Dict:
         combined_soup = main_block
 
     all_text = clean_text(all_text)
-    chunks = chunk_text(all_text)
-
-    data = await rag_extract(chunks, site_url)
-    if data:
-        # Fix fallback for addresses if GPT failed
-        if "Address" not in data or not data["Address"]:
-            data["Address"] = extract_addresses(all_text)
-        # Fix Business Name if empty
-        if "Business Name" not in data or not data["Business Name"]:
-            data["Business Name"] = site_url.split("//")[-1].split("/")[0].replace("www.","").title()
-        return data
-
-    # fallback
     services = extract_services_from_soup(combined_soup)
     socials = extract_social_links(combined_soup)
+    addresses = extract_addresses(combined_soup)
+
     return {
-        "Business Name": site_url.split("//")[-1].split("/")[0].replace("www.","").title(),
+        "Business Name": site_url.split("//")[-1].replace("www.","").split(".com")[0].title(),
         "About Us": all_text[:500],
-        "Main Services": services[:10], 
+        "Main Services": services[:10],
         "Email": extract_email(all_text),
         "Phone": extract_phone(all_text),
-        "Address": extract_addresses(all_text),
+        "Address": addresses,
         "Facebook": socials.get("Facebook",""),
         "Instagram": socials.get("Instagram",""),
         "LinkedIn": socials.get("LinkedIn",""),
