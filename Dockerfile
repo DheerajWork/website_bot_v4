@@ -43,5 +43,5 @@ COPY . .
 # ✅ Expose the port for Railway
 EXPOSE 8000
 
-# ✅ Run the FastAPI app with uvicorn
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+# ✅ Run the FastAPI app with uvicorn (dynamic port from Railway)
+CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]

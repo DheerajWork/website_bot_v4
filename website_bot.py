@@ -1,34 +1,17 @@
-
 #!/usr/bin/env python3
 """
-website_bot.py
-    
-Flow:
-1) Input site URL
-2) Crawl internal links (depth-limited) -> print site structure
-3) Auto-select Home, Contact, About pages
-4) Deep scrape those 3 pages (Playwright)
-5) Chunk scraped text with chunk_size=180 words and overlap=30
-6) Store chunks in ChromaDB using OpenAI embeddings
-7) Run a RAG extraction: retrieve top chunks and call LLM (gpt-3.5-turbo)
-8) Print clean JSON output
-
-Cost-saving: Only 3 pages are embedded; embedding model = text-embedding-3-small; LLM model = gpt-3.5-turbo
+website_bot.py — main scraping + ChromaDB + RAG extraction
 """
 
 import os, re, time, json, random, urllib.parse
-from typing import List, Tuple
+from typing import List
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
 # ---------------- Config ----------------
-
-
 load_dotenv(override=True)
-# Now fetch the updated value
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-print(OPENAI_KEY)
 os.environ["OPENAI_API_KEY"] = OPENAI_KEY
 
 USE_HEADLESS = True
@@ -40,15 +23,15 @@ try:
     import chromadb
     from chromadb.utils import embedding_functions
     from openai import OpenAI
-except Exception as e:
-    raise SystemExit("Install required packages: pip install playwright beautifulsoup4 chromadb openai tiktoken")
+except Exception:
+    raise SystemExit("Install packages: pip install playwright beautifulsoup4 chromadb openai tiktoken")
 
 chroma_client = chromadb.Client()
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(api_key=OPENAI_KEY, model_name="text-embedding-3-small")
 
-# ---------------- Helper functions ----------------
-def clean_text(t):
+# ---------------- Helper Functions ----------------
+def clean_text(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
@@ -84,7 +67,6 @@ def crawl_site(base_url, max_pages=100):
         url = queue.pop(0)
         if url in visited:
             continue
-        print(f"Visiting: {url}")
         html = fetch_page(url)
         site_structure.append(url)
         links = extract_links(base_url, html)
@@ -152,26 +134,16 @@ Text: {context_text}
     except:
         return {"raw_ai": raw}
 
-# ---------------- Main Flow ----------------
-if __name__=="__main__":
-    site_url = input("Enter website URL: ").strip()
+# ---------------- Main Scraping Function ----------------
+def scrape_website(site_url: str) -> dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
 
-    print("🔍 Crawling site structure...")
     all_urls = crawl_site(site_url, max_pages=100)
-    print("\nSite structure URLs found:")
-    for u in all_urls:
-        print(u)
-
     main_pages = select_main_pages(all_urls)
-    print("\nSelected main pages for deep scraping:")
-    for p in main_pages:
-        print(p)
 
     all_text = ""
     for page_url in main_pages:
-        print(f"\nScraping page: {page_url}")
         html = fetch_page(page_url)
         soup = BeautifulSoup(html,"html.parser")
         [s.extract() for s in soup(["script","style","noscript"])]
@@ -181,10 +153,9 @@ if __name__=="__main__":
     all_text = clean_text(all_text)
     chunks = chunk_text(all_text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
 
-    print("\nStoring chunks in ChromaDB and running RAG extraction...")
     final_data = rag_extract(chunks, site_url)
 
-    # Fallback extractions if LLM fails
+    # fallback if LLM fails
     if not final_data:
         final_data = {
             "Business Name":"",
@@ -200,8 +171,10 @@ if __name__=="__main__":
             "Description":"",
             "URL": site_url
         }
+    return final_data
 
-    print("\n✅ Final Extracted Data:")
-    print(json.dumps(final_data, indent=2, ensure_ascii=False))
-
-
+# ---------------- CLI Test ----------------
+if __name__=="__main__":
+    site_url = input("Enter website URL: ").strip()
+    data = scrape_website(site_url)
+    print(json.dumps(data, indent=2, ensure_ascii=False))
