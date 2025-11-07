@@ -1,34 +1,31 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Scraping + ChromaDB + RAG Extraction (Railway safe)
+website_bot.py — Scraping + ChromaDB + RAG Extraction (Railway-safe + Background-friendly)
 """
 
 import os, re, time, json, random, urllib.parse
 from typing import List
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ---------------- Load Environment ----------------
-# ✅ Load .env only in local (Railway already provides env vars)
 if os.path.exists(".env"):
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-
-# ✅ Safety check (will only raise if truly missing)
 if not OPENAI_KEY:
-    print("⚠️ OPENAI_API_KEY not found. Make sure it's set in Railway Variables.")
+    print("⚠️ OPENAI_API_KEY not found. Set it in Railway Variables.")
 else:
     print("✅ OPENAI_API_KEY detected successfully.")
-
 os.environ["OPENAI_API_KEY"] = OPENAI_KEY or ""
 
 # ---------------- Config ----------------
 USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
-MAX_CRAWL_PAGES = 10  # Limit for faster API response
+MAX_CRAWL_PAGES = 5  # Railway-friendly limit
+FETCH_TIMEOUT = 30000  # 30 sec per page
 
 # ---------------- Imports ----------------
 try:
@@ -41,7 +38,9 @@ except Exception:
 # ---------------- Clients ----------------
 chroma_client = chromadb.Client()
 openai_client = OpenAI(api_key=OPENAI_KEY)
-openai_ef = embedding_functions.OpenAIEmbeddingFunction(api_key=OPENAI_KEY, model_name="text-embedding-3-small")
+openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+    api_key=OPENAI_KEY, model_name="text-embedding-3-small"
+)
 
 # ---------------- Helpers ----------------
 def clean_text(t: str) -> str:
@@ -50,17 +49,22 @@ def clean_text(t: str) -> str:
 def fetch_page(url: str, headless=True) -> str:
     print(f"[INFO] Fetching: {url}")
     html = ""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(viewport={"width":1280,"height":800})
-        page = context.new_page()
-        try:
-            page.goto(url, timeout=45000)
-            time.sleep(2 + random.random()*2)
-            html = page.content()
-        except Exception as e:
-            print(f"[ERROR] Failed to fetch {url}: {e}")
-        page.close(); context.close(); browser.close()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context(viewport={"width":1280,"height":800})
+            page = context.new_page()
+            try:
+                page.goto(url, timeout=FETCH_TIMEOUT)
+                time.sleep(1 + random.random()*2)
+                html = page.content()
+            except PlaywrightTimeoutError:
+                print(f"[WARN] Timeout loading {url}")
+            except Exception as e:
+                print(f"[ERROR] Failed to fetch {url}: {e}")
+            page.close(); context.close(); browser.close()
+    except Exception as e:
+        print(f"[ERROR] Browser launch failed: {e}")
     return html
 
 def extract_links(base_url, html_text) -> List[str]:
@@ -122,30 +126,32 @@ def extract_address(text):
 # ---------------- RAG Extraction ----------------
 def rag_extract(chunks, url):
     print(f"[INFO] Running RAG extraction for {url}")
-    coll = chroma_client.get_or_create_collection("rag_extract_collection", embedding_function=openai_ef)
+    coll = chroma_client.get_or_create_collection(
+        "rag_extract_collection", embedding_function=openai_ef
+    )
     for i, ch in enumerate(chunks):
         coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
     query = "Extract Business Name, About Us, Main Services, Email, Phone, Address, Social Links, Description, URL"
-    res = coll.query(query_texts=[query], n_results=3)
-    context_text = " ".join(res.get("documents", [[""]])[0]) or " ".join(chunks[:3])
-    prompt = f"""
+    try:
+        res = coll.query(query_texts=[query], n_results=3)
+        context_text = " ".join(res.get("documents", [[""]])[0]) or " ".join(chunks[:3])
+        prompt = f"""
 You are a data extraction assistant. Return JSON with:
 Business Name, About Us, Main Services (list), Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter, Description, URL.
 Website: {url}
 Text: {context_text}
 """
-    resp = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-    )
-    raw = resp.choices[0].message.content.strip()
-    raw = re.sub(r"^```json|```$", "", raw)
-    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = re.sub(r"^```json|```$", "", raw)
         return json.loads(raw)
-    except:
-        print("[WARN] Failed to parse AI JSON output.")
-        return {"raw_ai": raw}
+    except Exception as e:
+        print(f"[WARN] RAG/AI failed: {e}")
+        return {"raw_ai": "Failed to extract"}
 
 # ---------------- Main Scraping Function ----------------
 def scrape_website(site_url: str) -> dict:
