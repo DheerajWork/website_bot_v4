@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Core website scraper module (Async) with GPT + RAG for structured extraction
+website_bot.py — Core website scraper module (Async)
 """
 
 import os, re, json, random, urllib.parse, asyncio
@@ -39,6 +39,40 @@ def extract_phone(text: str) -> str:
     m = re.findall(r"(\+\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{2,4}[\s\-]?\d{2,4})", text)
     return m[0] if m else ""
 
+def extract_address(text: str) -> str:
+    lines = text.splitlines()
+    for line in lines:
+        if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
+            return line.strip()
+    return ""
+
+def extract_addresses(text: str):
+    """Extract multiple addresses from text"""
+    lines = text.splitlines()
+    addresses = {}
+    for line in lines:
+        if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
+            parts = [p.strip() for p in line.split(",")]
+            city = parts[-2] if len(parts) >= 2 else "Main"
+            addresses[city] = line.strip()
+    return addresses if addresses else extract_address(text)
+
+def select_main_pages(urls: list):
+    home = urls[0] if urls else ""
+    about = next((u for u in urls if "about" in u.lower()), "")
+    contact = next((u for u in urls if "contact" in u.lower()), "")
+    return list(filter(None, [home, about, contact]))
+
+def extract_services_from_soup(soup):
+    services = []
+    if not soup:
+        return services
+    for li in soup.find_all("li"):
+        text = clean_text(li.get_text(" ", strip=True))
+        if 3 < len(text.split()) < 12:
+            services.append(text)
+    return services
+
 def extract_social_links(soup):
     socials = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
     if not soup:
@@ -54,22 +88,6 @@ def extract_social_links(soup):
         elif "twitter.com" in href or "x.com" in href:
             socials["Twitter / X"] = href
     return socials
-
-def extract_services_from_soup(soup):
-    services = []
-    if not soup:
-        return services
-    for li in soup.find_all("li"):
-        text = clean_text(li.get_text(" ", strip=True))
-        if 2 < len(text.split()) < 12:
-            services.append(text)
-    return services
-
-def select_main_pages(urls: list):
-    home = urls[0] if urls else ""
-    about = next((u for u in urls if "about" in u.lower()), "")
-    contact = next((u for u in urls if "contact" in u.lower()), "")
-    return list(filter(None, [home, about, contact]))
 
 # ---------------- Async Playwright ----------------
 from playwright.async_api import async_playwright
@@ -117,7 +135,7 @@ async def crawl_site(base_url: str, max_pages=MAX_PAGES) -> list:
         visited.add(url)
     return site_structure
 
-# ---------------- GPT + RAG ----------------
+# ---------------- RAG / GPT ----------------
 try:
     import chromadb
     from chromadb.utils import embedding_functions
@@ -139,20 +157,31 @@ async def rag_extract(chunks, url):
     if not openai_client or not openai_ef:
         return None
     coll = chroma_client.get_or_create_collection(
-        "rag_company_extraction", embedding_function=openai_ef
+        "three_page_rag_collection", embedding_function=openai_ef
     )
     for i, ch in enumerate(chunks):
         coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
-    query = "Extract all company details as structured JSON"
+    query = "Extract structured company info as JSON with business name, about us, main services, emails, phones, multiple addresses, social links, description, URL"
     res = coll.query(query_texts=[query], n_results=3)
     context_text = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
 
     prompt = f"""
-You are a professional data extraction assistant.
-Extract complete company info from the following text.
-Return STRICT JSON ONLY, with keys:
-Business Name, About Us, Main Services (list), Email, Phone, Address (JSON if multiple locations),
-Facebook, Instagram, LinkedIn, Twitter / X, Description, URL.
+You are a professional data extraction assistant. 
+Extract all company details from the following text and return STRICT JSON ONLY:
+
+Keys: 
+- Business Name
+- About Us
+- Main Services (list)
+- Email
+- Phone
+- Address (if multiple locations, return as JSON with city names as keys)
+- Facebook
+- Instagram
+- LinkedIn
+- Twitter / X
+- Description
+- URL
 
 Text: {context_text}
 URL: {url}
@@ -200,13 +229,13 @@ async def scrape_website(site_url: str) -> Dict:
     if data:
         return data
 
-    # fallback if RAG fails
+    # fallback
     services = extract_services_from_soup(combined_soup)
     socials = extract_social_links(combined_soup)
     return {
         "Business Name": "",
         "About Us": all_text[:500],
-        "Main Services": services[:10],
+        "Main Services": services[:10], 
         "Email": extract_email(all_text),
         "Phone": extract_phone(all_text),
         "Address": extract_addresses(all_text),

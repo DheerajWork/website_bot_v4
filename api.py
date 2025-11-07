@@ -28,7 +28,7 @@ async def scrape_endpoint(request: ScrapeRequest):
         url = "https://" + url
 
     try:
-        data = await scrape_website(url)  # ✅ await for async
+        data = await scrape_website(url)
         return {"status": "success", "data": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
