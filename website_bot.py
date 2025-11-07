@@ -1,46 +1,35 @@
 #!/usr/bin/env python3
 """
-website_bot.py — Advanced Async Website Scraper with GPT + RAG Extraction
+website_bot.py — Core website scraper module (Async)
 """
 
 import os, re, json, random, urllib.parse, asyncio
-from typing import Dict, List
+from typing import Dict
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # ---------------- Config ----------------
 load_dotenv(override=True)
-USE_HEADLESS = True
-MAX_PAGES = 10
-CHUNK_SIZE = 200
-CHUNK_OVERLAP = 40
 
-# ---------------- Text Cleaning ----------------
-def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+USE_HEADLESS = True
+CHUNK_SIZE = 180
+CHUNK_OVERLAP = 30
+MAX_PAGES = 20
+USE_RAG = True  # Use GPT + RAG for structured extraction
+
+# ---------------- Helper functions ----------------
+def clean_text(t: str) -> str:
+    return re.sub(r"\s+", " ", t).strip()
 
 def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
     words = text.split()
-    chunks, i = [], 0
+    chunks = []
+    i = 0
     while i < len(words):
         chunk = words[i:i + size]
         chunks.append(" ".join(chunk))
         i += size - overlap
     return chunks
-
-# ---------------- Simple Extraction Helpers ----------------
-def extract_meta_info(soup):
-    """Extract meta title, description, and site_name"""
-    meta = {"title": "", "description": "", "site_name": ""}
-    if not soup:
-        return meta
-    title_tag = soup.find("title")
-    meta["title"] = title_tag.get_text(strip=True) if title_tag else ""
-    desc_tag = soup.find("meta", attrs={"name": "description"})
-    meta["description"] = desc_tag["content"].strip() if desc_tag and desc_tag.get("content") else ""
-    og_site = soup.find("meta", property="og:site_name")
-    meta["site_name"] = og_site["content"].strip() if og_site and og_site.get("content") else ""
-    return meta
 
 def extract_email(text: str) -> str:
     m = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
@@ -50,24 +39,34 @@ def extract_phone(text: str) -> str:
     m = re.findall(r"(\+\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{2,4}[\s\-]?\d{2,4})", text)
     return m[0] if m else ""
 
-def extract_address(text: str) -> str:
+def extract_address(text: str) -> Dict:
+    # Try to extract multiple addresses
+    addresses = {}
     lines = text.splitlines()
     for line in lines:
+        line = line.strip()
         if any(ch.isdigit() for ch in line) and len(line.split()) > 3:
-            return line.strip()
-    return ""
+            # Try to guess city
+            city_match = re.search(r'([A-Z][a-z]+(?: [A-Z][a-z]+)*)', line)
+            city = city_match.group(0) if city_match else "Address"
+            addresses[city] = line
+    return addresses if addresses else {}
 
-def extract_services(soup):
-    """Try to extract service or product items"""
-    services = set()
+def select_main_pages(urls: list):
+    home = urls[0] if urls else ""
+    about = next((u for u in urls if "about" in u.lower()), "")
+    contact = next((u for u in urls if "contact" in u.lower()), "")
+    return list(filter(None, [home, about, contact]))
+
+def extract_services_from_soup(soup):
+    services = []
     if not soup:
-        return []
-    for tag in soup.find_all(["li", "p", "h3", "h4", "span"]):
-        txt = clean_text(tag.get_text(" ", strip=True))
-        if any(w in txt.lower() for w in ["service", "solution", "product", "design", "consulting"]):
-            if 3 < len(txt.split()) < 15:
-                services.add(txt)
-    return list(services)
+        return services
+    for li in soup.find_all("li"):
+        text = clean_text(li.get_text(" ", strip=True))
+        if 2 < len(text.split()) < 12:
+            services.append(text)
+    return services
 
 def extract_social_links(soup):
     socials = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
@@ -88,10 +87,11 @@ def extract_social_links(soup):
 # ---------------- Async Playwright ----------------
 from playwright.async_api import async_playwright
 
-async def fetch_page(url: str, headless=USE_HEADLESS) -> str:
+async def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
+    """Load a webpage and return its HTML (Async)"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
+        context = await browser.new_context(viewport={"width": 1280, "height": 800})
         page = await context.new_page()
         html = ""
         try:
@@ -106,34 +106,39 @@ async def fetch_page(url: str, headless=USE_HEADLESS) -> str:
             await browser.close()
     return html
 
-async def crawl_site(base_url: str, max_pages=MAX_PAGES) -> List[str]:
+async def crawl_site(base_url: str, max_pages=MAX_PAGES) -> list:
     visited, queue = set(), [base_url.rstrip("/")]
-    all_urls = []
+    site_structure = []
     while queue and len(visited) < max_pages:
         url = queue.pop(0)
         if url in visited:
             continue
         html = await fetch_page(url)
-        if not html:
-            continue
-        all_urls.append(url)
+        site_structure.append(url)
         soup = BeautifulSoup(html, "html.parser")
+        links = set()
         for a in soup.find_all("a", href=True):
-            href = urllib.parse.urljoin(base_url, a["href"].split("#")[0])
-            if href.startswith(base_url):
-                queue.append(href.rstrip("/"))
+            href = a["href"].strip()
+            if href.startswith(("mailto:", "tel:")):
+                continue
+            full_url = urllib.parse.urljoin(base_url, href.split("#")[0])
+            if full_url.startswith(base_url):
+                links.add(full_url.rstrip("/"))
+        for l in links:
+            if l not in visited and l not in queue and len(visited) + len(queue) < max_pages:
+                queue.append(l)
         visited.add(url)
-    return list(dict.fromkeys(all_urls))
+    return site_structure
 
-# ---------------- GPT + RAG ----------------
+# ---------------- RAG / GPT ----------------
 try:
     import chromadb
     from chromadb.utils import embedding_functions
     from openai import OpenAI
-except ImportError:
+except Exception:
     chromadb = None
-    embedding_functions = None
     OpenAI = None
+    embedding_functions = None
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 chroma_client = chromadb.Client() if chromadb else None
@@ -144,30 +149,28 @@ openai_ef = (
 )
 
 async def rag_extract(chunks, url):
-    """Use GPT + RAG to extract structured info"""
     if not openai_client or not openai_ef:
         return None
-
-    coll = chroma_client.get_or_create_collection("rag_extraction", embedding_function=openai_ef)
+    coll = chroma_client.get_or_create_collection(
+        "company_rag_collection", embedding_function=openai_ef
+    )
     for i, ch in enumerate(chunks):
-        coll.add(documents=[ch], metadatas=[{"url": url}], ids=[f"{url}_chunk_{i}"])
-
-    query_text = "Extract full structured company information."
-    res = coll.query(query_texts=[query_text], n_results=3)
-    context = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
+        coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
+    query = "Extract structured company info as JSON"
+    res = coll.query(query_texts=[query], n_results=3)
+    context_text = " ".join(res.get("documents", [[]])[0]) if res else " ".join(chunks[:3])
 
     prompt = f"""
-You are a professional data extraction assistant.
-From the provided text, extract detailed company data.
-Return STRICT JSON (no markdown, no explanation).
+You are a professional data extraction assistant. 
+Extract all company details from the following text and return STRICT JSON ONLY:
 
-Keys:
+Keys: 
 - Business Name
 - About Us
-- Main Services (as list)
+- Main Services (list)
 - Email
 - Phone
-- Address
+- Address (multiple locations if any)
 - Facebook
 - Instagram
 - LinkedIn
@@ -175,14 +178,13 @@ Keys:
 - Description
 - URL
 
-Website: {url}
+Text: {context_text}
+URL: {url}
 
-Text:
-{context}
+Return ONLY valid JSON, no explanations.
 """
-
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
@@ -192,52 +194,61 @@ Text:
     try:
         return json.loads(raw)
     except:
-        return {"raw_ai_output": raw}
+        return {"raw_ai": raw}
 
-# ---------------- Public Function ----------------
+# ---------------- Public Async Scrape ----------------
 async def scrape_website(site_url: str) -> Dict:
     if not site_url.startswith("http"):
         site_url = "https://" + site_url
 
-    urls = await crawl_site(site_url, MAX_PAGES)
-    main_urls = [u for u in urls if any(x in u for x in ["about", "contact", "service"])] or urls[:3]
+    all_urls = await crawl_site(site_url, max_pages=MAX_PAGES)
+    main_pages = select_main_pages(all_urls)
 
-    full_text = ""
+    all_text = ""
     combined_soup = None
-    for u in main_urls:
-        html = await fetch_page(u)
+    business_name = ""
+    for page_url in main_pages:
+        html = await fetch_page(page_url)
         if not html:
             continue
         soup = BeautifulSoup(html, "html.parser")
-        for s in soup(["script", "style", "noscript"]):
+        for s in soup(["script","style","noscript","header","footer","nav"]):
             s.extract()
-        main_block = soup.find("main") or soup
-        full_text += " " + clean_text(main_block.get_text(" ", strip=True))
-        combined_soup = soup
+        main_block = soup.find("main") or soup.find("section") or soup.find("div", {"id":"content"}) or soup
+        all_text += clean_text(main_block.get_text(" ", strip=True))
+        combined_soup = main_block
+        # Attempt business name from <title> or <h1>
+        if not business_name:
+            title_tag = soup.find("title")
+            h1_tag = soup.find("h1")
+            if title_tag and title_tag.text.strip():
+                business_name = clean_text(title_tag.text.strip())
+            elif h1_tag and h1_tag.text.strip():
+                business_name = clean_text(h1_tag.text.strip())
 
-    full_text = clean_text(full_text)
-    chunks = chunk_text(full_text)
+    all_text = clean_text(all_text)
+    chunks = chunk_text(all_text)
 
-    # Try GPT + RAG extraction
     data = await rag_extract(chunks, site_url)
     if data:
+        if not data.get("Business Name") and business_name:
+            data["Business Name"] = business_name
         return data
 
-    # Fallback simple extraction
-    meta = extract_meta_info(combined_soup)
+    # fallback if RAG/GPT fails
+    services = extract_services_from_soup(combined_soup)
     socials = extract_social_links(combined_soup)
-    services = extract_services(combined_soup)
     return {
-        "Business Name": meta["site_name"] or meta["title"],
-        "About Us": full_text[:600],
-        "Main Services": services[:10],
-        "Email": extract_email(full_text),
-        "Phone": extract_phone(full_text),
-        "Address": extract_address(full_text),
-        "Facebook": socials["Facebook"],
-        "Instagram": socials["Instagram"],
-        "LinkedIn": socials["LinkedIn"],
-        "Twitter / X": socials["Twitter / X"],
-        "Description": meta["description"] or full_text[:400],
+        "Business Name": business_name,
+        "About Us": all_text[:500],
+        "Main Services": services[:10], 
+        "Email": extract_email(all_text),
+        "Phone": extract_phone(all_text),
+        "Address": extract_address(all_text),
+        "Facebook": socials.get("Facebook",""),
+        "Instagram": socials.get("Instagram",""),
+        "LinkedIn": socials.get("LinkedIn",""),
+        "Twitter / X": socials.get("Twitter / X",""),
+        "Description": all_text[:300],
         "URL": site_url
     }
