@@ -1,4 +1,3 @@
-# api.py
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from concurrent.futures import ThreadPoolExecutor
 import uuid
@@ -7,7 +6,7 @@ from website_bot import scrape_website
 app = FastAPI(title="Website Data Scraper API")
 
 executor = ThreadPoolExecutor(max_workers=2)
-scrape_results = {}  # In-memory storage for demo
+scrape_results = {}
 
 @app.get("/")
 async def home():
@@ -30,7 +29,7 @@ async def scrape(request: Request, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
     background_tasks.add_task(run_scrape, task_id, url)
     
-    return {"status": "processing", "task_id": task_id, "message": "Scraping started in background"}
+    return {"status": "processing", "task_id": task_id, "message": "Scraping started"}
 
 @app.get("/result/{task_id}")
 async def get_result(task_id: str):
