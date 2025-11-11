@@ -1,35 +1,31 @@
 import asyncio
+import os
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 from website_bot import scrape_website
 
-# Disable debug mode for asyncio to avoid performance overhead
+# 🧠 Disable debug event loop (important for Railway)
 asyncio.get_event_loop().set_debug(False)
 
-app = FastAPI(title="🚀 Website Scraper API (Optimized)")
+app = FastAPI(title="Website Scraper API (Railway Optimized)")
 
-executor = ThreadPoolExecutor(max_workers=3)
-scrape_results = {}  # In-memory storage for task results
+executor = ThreadPoolExecutor(max_workers=2)
+scrape_results = {}  # In-memory storage
 
 @app.get("/")
 async def home():
     return {"message": "✅ Website Scraper API is running successfully on Railway!"}
 
 def run_scrape(task_id: str, url: str):
-    """Run the website scrape in a background thread"""
     try:
-        print(f"🔍 Starting scrape for {url}")
         result = scrape_website(url)
         scrape_results[task_id] = {"status": "success", "data": result}
-        print(f"✅ Completed scrape for {url}")
     except Exception as e:
         scrape_results[task_id] = {"status": "error", "message": str(e)}
-        print(f"❌ Error scraping {url}: {e}")
 
 @app.post("/scrape")
 async def scrape(request: Request, background_tasks: BackgroundTasks):
-    """Start the scraping task"""
     body = await request.json()
     url = body.get("url")
     if not url:
@@ -41,13 +37,12 @@ async def scrape(request: Request, background_tasks: BackgroundTasks):
     return {
         "status": "processing",
         "task_id": task_id,
-        "message": f"Full RAG scraping started in background for {url}"
+        "message": "Full RAG scraping started in background"
     }
 
 @app.get("/result/{task_id}")
 async def get_result(task_id: str):
-    """Check task result"""
     result = scrape_results.get(task_id)
     if not result:
-        return {"status": "pending", "message": "⏳ Result not ready yet"}
+        return {"status": "pending", "message": "Result not ready yet"}
     return result

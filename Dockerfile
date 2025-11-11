@@ -21,11 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ✅ Install Playwright Chromium (headless)
 RUN playwright install --with-deps chromium
 
-# ✅ Copy source code
+# ✅ Copy project files
 COPY . .
 
-# ✅ Expose Railway port (always use env variable)
+# ✅ Expose correct Railway port
 EXPOSE ${PORT}
 
-# ✅ Launch FastAPI with correct port for Railway
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT}"]
+# ✅ Start FastAPI app with Railway PORT
+CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT} --timeout-keep-alive 75"]
