@@ -1,67 +1,206 @@
-import os, json, re, time
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv(override=True)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# 🔥 Strong prompt for RAG extraction
-EXTRACTION_PROMPT = """
-You are an intelligent business data extractor.
-From the provided website text, extract the following fields:
-- Business Name
-- About Us
-- Main Services (list)
-- Email
-- Phone
-- Address (city wise if found)
-- Facebook
-- Instagram
-- LinkedIn
-- Twitter
-- Description (short 2–3 lines)
-Return a valid JSON.
+#!/usr/bin/env python3
+"""
+website_bot.py — Fast multi-website scraper with lazy browser load and strong RAG
 """
 
-def scrape_website(url: str):
-    print(f"🔍 Running full scrape (this may take a while)...")
+import os, re, time, json, urllib.parse
+from typing import List
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
-    # Playwright scrape (fast mode)
+# ---------------- Config ----------------
+load_dotenv(override=True)
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_KEY:
+    raise SystemExit("❌ OPENAI_API_KEY missing in .env")
+os.environ["OPENAI_API_KEY"] = OPENAI_KEY
+
+USE_HEADLESS = True
+CHUNK_SIZE = 180
+CHUNK_OVERLAP = 30
+
+# ---------------- Imports (lazy load supported) ----------------
+def lazy_imports():
+    global chromadb, embedding_functions, OpenAI, sync_playwright
+    import chromadb
+    from chromadb.utils import embedding_functions
+    from openai import OpenAI
+    from playwright.sync_api import sync_playwright
+
+# ---------------- Helper functions ----------------
+def clean_text(t):
+    return re.sub(r"\s+", " ", t).strip()
+
+def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
+    """Fetch page with Playwright (lazy-loaded for performance)"""
+    from playwright.sync_api import sync_playwright  # lazy import
+    html = ""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, timeout=60000)
-        page = browser.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        html = page.content()
-        browser.close()
+        browser = p.chromium.launch(headless=headless)
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+        try:
+            page.goto(url, timeout=50000, wait_until="networkidle")
+            # scroll for lazy-load content
+            for _ in range(2):
+                page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                time.sleep(1)
+            html = page.content()
+            # capture iframe content too
+            for frame in page.frames:
+                try:
+                    html += frame.content()
+                except:
+                    pass
+        except Exception as e:
+            print(f"⚠️ Page fetch failed for {url}: {e}")
+        finally:
+            page.close()
+            context.close()
+            browser.close()
+    return html
 
-    soup = BeautifulSoup(html, "html.parser")
+def extract_links(base_url, html_text) -> List[str]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    links = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith("mailto:") or href.startswith("tel:"):
+            continue
+        full_url = urllib.parse.urljoin(base_url, href.split("#")[0])
+        if full_url.startswith(base_url):
+            links.add(full_url.rstrip("/"))
+    return list(links)
 
-    # Extract visible text quickly
-    text = " ".join(s.get_text(separator=" ", strip=True) for s in soup.find_all(["p", "h1", "h2", "h3", "li"]))
-    text = re.sub(r"\s+", " ", text)
+def crawl_site(base_url, max_pages=20):
+    """Limit pages for performance (20 only)"""
+    visited, queue = set(), [base_url.rstrip("/")]
+    structure = []
+    while queue and len(visited) < max_pages:
+        url = queue.pop(0)
+        if url in visited:
+            continue
+        html = fetch_page(url)
+        structure.append(url)
+        for link in extract_links(base_url, html):
+            if link not in visited and len(visited) < max_pages:
+                queue.append(link)
+        visited.add(url)
+    return structure
 
-    # Use OpenAI RAG prompt
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.4,
-        messages=[
-            {"role": "system", "content": EXTRACTION_PROMPT},
-            {"role": "user", "content": text[:10000]}  # limit to avoid timeout
-        ],
+def select_main_pages(urls: List[str]):
+    home = urls[0] if urls else ""
+    about = next((u for u in urls if "about" in u.lower()), "")
+    contact = next((u for u in urls if "contact" in u.lower()), "")
+    return list(filter(None, [home, about, contact]))
+
+def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[str]:
+    words = text.split()
+    chunks = []
+    i = 0
+    while i < len(words):
+        chunk = words[i : i + size]
+        chunks.append(" ".join(chunk))
+        i += size - overlap
+    return chunks
+
+# ---------------- RAG Extraction ----------------
+def rag_extract(chunks, url):
+    """Run strong RAG extraction using ChromaDB + OpenAI"""
+    lazy_imports()
+    chroma_client = chromadb.Client()
+    openai_client = OpenAI(api_key=OPENAI_KEY)
+    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=OPENAI_KEY, model_name="text-embedding-3-small"
     )
 
-    raw_output = response.choices[0].message.content.strip()
+    coll = chroma_client.get_or_create_collection(
+        "multi_website_rag_collection", embedding_function=openai_ef
+    )
+    for i, ch in enumerate(chunks[:10]):  # limit stored chunks for speed
+        coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
 
-    # Validate JSON safely
+    query = (
+        "Extract clean JSON with these fields: "
+        "Business Name, About Us, Main Services (list), Email (list), Phone (list), "
+        "Address (dictionary per location), Facebook, Instagram, LinkedIn, Twitter/X, "
+        "Description, URL. Only real company/service info, no headings like Pricing/Features."
+    )
+
+    res = coll.query(query_texts=[query], n_results=3)
+    context = " ".join(res["documents"][0]) if res and "documents" in res else " ".join(chunks[:3])
+
+    prompt = f"""
+You are a structured data extraction AI.
+From the following website content, return JSON with fields:
+Business Name, About Us, Main Services (list), Email (list),
+Phone (list), Address (dictionary), Facebook, Instagram, LinkedIn,
+Twitter/X, Description, URL.
+
+Be accurate, ignore marketing fluff, and produce valid JSON.
+
+URL: {url}
+Text: {context}
+"""
     try:
-        data = json.loads(raw_output)
-    except Exception:
-        data = {"Raw Response": raw_output}
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r"^```json|```$", "", raw)
+        return json.loads(raw)
+    except Exception as e:
+        print("⚠️ RAG Extraction Error:", e)
+        return {"error": str(e)}
 
-    # Ensure URL field is present
-    data["URL"] = url
+# ---------------- Fallback Extraction ----------------
+def fallback_extract(text, site_url):
+    return {
+        "Business Name": "",
+        "About Us": "",
+        "Main Services": [],
+        "Email": re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text),
+        "Phone": re.findall(r"\+\d{1,3}[\s-]?\(?\d{1,4}\)?[\s-]?\d{2,4}[\s-]?\d{2,4}", text),
+        "Address": {},
+        "Facebook": "",
+        "Instagram": "",
+        "LinkedIn": "",
+        "Twitter/X": "",
+        "Description": "",
+        "URL": site_url,
+    }
 
-    print("✅ Extraction complete!")
+# ---------------- Main Function ----------------
+def scrape_website(site_url: str):
+    if not site_url.startswith("http"):
+        site_url = "https://" + site_url
+
+    print("🔍 Running full scrape (fast mode)...")
+    urls = crawl_site(site_url, max_pages=20)
+    main_pages = select_main_pages(urls)
+
+    full_text = ""
+    for page in main_pages:
+        html = fetch_page(page)
+        soup = BeautifulSoup(html, "html.parser")
+        [s.extract() for s in soup(["script", "style", "noscript"])]
+        text = clean_text(soup.get_text(" ", strip=True))
+        full_text += " " + text
+        if soup.title:
+            full_text += " " + soup.title.string
+
+    chunks = chunk_text(clean_text(full_text))
+    data = rag_extract(chunks, site_url)
+    if not data:
+        data = fallback_extract(full_text, site_url)
+
     return data
+
+# ---------------- CLI Run ----------------
+if __name__ == "__main__":
+    url = input("Enter website URL: ").strip()
+    result = scrape_website(url)
+    print("\n=== FULL RAG RESULT ===")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
