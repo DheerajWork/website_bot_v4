@@ -22,12 +22,8 @@ from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
 # ---------------- Config ----------------
-
-
 load_dotenv(override=True)
-# Now fetch the updated value
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-print(OPENAI_KEY)
 os.environ["OPENAI_API_KEY"] = OPENAI_KEY
 
 USE_HEADLESS = True
@@ -126,12 +122,17 @@ def extract_address(text):
     return ""
 
 def rag_extract(chunks, url):
-    coll = chroma_client.get_or_create_collection("three_page_rag_collection", embedding_function=openai_ef)
-    for i,ch in enumerate(chunks):
-        coll.add(documents=[ch], metadatas=[{"url":url,"chunk":i}], ids=[f"{url}_chunk_{i}"])
+    # Unique collection per website to avoid old data interference
+    collection_name = f"collection_{re.sub(r'[^a-zA-Z0-9]', '_', url)}"
+    coll = chroma_client.get_or_create_collection(collection_name, embedding_function=openai_ef)
+    
+    for i, ch in enumerate(chunks):
+        coll.add(documents=[ch], metadatas=[{"url": url, "chunk": i}], ids=[f"{url}_chunk_{i}"])
+    
     query = "Extract Business Name, About Us, Main Services, Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL"
     res = coll.query(query_texts=[query], n_results=3)
     context_text = " ".join(res["documents"][0]) if res and "documents" in res else " ".join(chunks[:3])
+    
     prompt = f"""
 You are a data extraction assistant. Extract clean JSON from the following text with fields:
 Business Name, About Us, Main Services (list), Email, Phone, Address, Facebook, Instagram, LinkedIn, Twitter / X, Description, URL.
@@ -202,5 +203,3 @@ if __name__=="__main__":
 
     print("\n✅ Final Extracted Data:")
     print(json.dumps(final_data, indent=2, ensure_ascii=False))
-
-
