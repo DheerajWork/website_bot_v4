@@ -37,7 +37,11 @@ def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
     html = ""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
+            # ✅ Chromium launch with sandbox flags for Docker/Railway
+            browser = p.chromium.launch(
+                headless=headless,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
             context = browser.new_context(viewport={"width": 1280, "height": 800})
             page = context.new_page()
             page.goto(url, timeout=50000, wait_until="networkidle")
