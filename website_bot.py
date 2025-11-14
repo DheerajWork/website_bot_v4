@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 website_bot.py
-Final Updated Version — Playwright + ChromaDB + Guaranteed Social Media Extraction
+Final Updated Version — Playwright + ChromaDB + Guaranteed Social Media Extraction + Parallel Scraping
 """
 
 import os, re, time, json, urllib.parse
@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import requests
+import concurrent.futures
 
 # ---------------- Config ----------------
 load_dotenv(override=True)
@@ -225,15 +226,22 @@ if __name__ == "__main__":
     all_text = ""
     all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
-    for page in main_pages:
-        print(f"\nScraping page: {page}")
+    # ---- PARALLEL SCRAPING ----
+    def scrape_single_page(page):
         html = fetch_page(page)
-        page_social = extract_social_links_from_html(html)
-        for k, v in page_social.items():
-            if v and not all_social[k]: all_social[k] = v
+        social = extract_social_links_from_html(html)
         soup = BeautifulSoup(html, "html.parser")
         [s.extract() for s in soup(["script", "style", "noscript"])]
-        all_text += " " + clean_text(soup.get_text(" ", strip=True))
+        text = clean_text(soup.get_text(" ", strip=True))
+        return text, social
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        results = list(executor.map(scrape_single_page, main_pages))
+
+    for text, social in results:
+        all_text += " " + text
+        for k, v in social.items():
+            if v and not all_social[k]: all_social[k] = v
 
     all_text = clean_text(all_text)
     chunks = chunk_text(all_text)
