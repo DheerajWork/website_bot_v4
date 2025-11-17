@@ -122,11 +122,19 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 # ---------------- Sitemap + Firecrawl ----------------
 def get_urls_from_sitemap(url):
     try:
-        u = urllib.parse.urljoin(url, "/sitemap.xml")
-        r = requests.get(u, timeout=10)
-        if r.status_code != 200: return []
-        soup = BeautifulSoup(r.text, "xml")
-        return [loc.get_text().strip() for loc in soup.find_all("loc")]
+        u = [urllib.parse.urljoin(url, x) for x in ["/sitemap.xml", "/sitemap_index.xml"]]  # ✅ SINGLE LINE CHANGE
+        urls = []
+        for sm in u:
+            try:
+                r = requests.get(sm, timeout=10)
+                if r.status_code != 200: 
+                    continue
+                soup = BeautifulSoup(r.text, "xml")
+                for loc in soup.find_all("loc"):
+                    urls.append(loc.get_text().strip())
+            except:
+                pass
+        return urls
     except:
         return []
 
