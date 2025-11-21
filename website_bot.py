@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import requests
 import concurrent.futures
+from chromadb.config import Settings
 
 # ---------------- Config ----------------
 load_dotenv(override=True)
@@ -32,7 +33,12 @@ try:
 except:
     raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
 
-chroma_client = chromadb.Client()
+chroma_client = chromadb.Client(
+    Settings(
+        chroma_db_impl="duckdb+parquet",
+        persist_directory="chroma_db"
+    )
+)
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_KEY, 
