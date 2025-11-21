@@ -7,7 +7,6 @@ Best multi-office extraction, perfect contacts, with improved LLM accuracy
 
 import os, re, time, json, urllib.parse
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import requests
 import concurrent.futures
@@ -18,7 +17,6 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 FIRECRAWL_KEY = os.getenv("FIRECRAWL_API_KEY")
 os.environ["OPENAI_API_KEY"] = OPENAI_KEY
 
-USE_HEADLESS = True
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
 
@@ -33,7 +31,7 @@ try:
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except:
-    raise SystemExit("Install required packages: pip install playwright beautifulsoup4 chromadb openai lxml")
+    raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
 
 chroma_client = chromadb.Client()
 openai_client = OpenAI(api_key=OPENAI_KEY)
@@ -47,21 +45,37 @@ def clean_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
 # Fast Playwright Fetch
-def fetch_page(url: str, headless: bool = USE_HEADLESS) -> str:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=["--disable-web-security", "--disable-features=IsolateOrigins,site-per-process"]
-        )
-        page = browser.new_context().new_page()
+def fetch_page(url: str) -> str:
+    """
+    First try Requests.
+    If blocked, try Firecrawl HTML extraction (if API key exists).
+    """
+    # 1. Normal fetch
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200 and len(r.text) > 200:
+            return r.text
+    except:
+        pass
+
+    # 2. Firecrawl Fallback (if available)
+    if FIRECRAWL_KEY:
         try:
-            page.goto(url, timeout=40000, wait_until="domcontentloaded")
-            page.wait_for_timeout(800)
-            html = page.content()
+            fc_url = "https://api.firecrawl.dev/v2/scrape"
+            headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
+            payload = {"url": url, "formats": ["html"]}
+
+            fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
+            html = fc.json().get("html", "")
+            return html
         except:
-            html = ""
-        browser.close()
-    return html
+            pass
+
+    return ""
 
 # ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
