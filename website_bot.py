@@ -15,7 +15,6 @@ import concurrent.futures
 load_dotenv(override=True)
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 FIRECRAWL_KEY = os.getenv("FIRECRAWL_API_KEY")
-os.environ["OPENAI_API_KEY"] = OPENAI_KEY
 
 CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
@@ -201,8 +200,20 @@ def select_main_pages(urls, base):
 
 # ---------------- RAG Extraction ----------------
 def sanitize_collection_name(url):
+    # Replace invalid characters
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", url)
-    return f"collection_{name or 'default'}"
+
+    # Remove leading invalid chars
+    name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
+
+    # Remove trailing invalid chars
+    name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
+
+    if not name:
+        name = "default"
+
+    return f"collection_{name}"
+
 
 def rag_extract(chunks, site_url):
     cname = sanitize_collection_name(site_url)

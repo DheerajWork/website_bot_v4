@@ -1,20 +1,3 @@
-#21-11
-from dotenv import load_dotenv
-import os
-
-# Load env variables first
-load_dotenv("/home/mysampark.shop/public_html/.env", override=True)
-
-# Optionally assign them to environment
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-os.environ["FIRECRAWL_API_KEY"] = os.getenv("FIRECRAWL_API_KEY")
-
-# Debug: confirm keys
-print("OPENAI_KEY:", os.environ["OPENAI_API_KEY"])
-print("FIRECRAWL_KEY:", os.environ["FIRECRAWL_API_KEY"])
-
-
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from website_bot import (
