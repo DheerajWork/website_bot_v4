@@ -26,23 +26,16 @@ if not FIRECRAWL_KEY:
 
 # ---------------- ChromaDB & OpenAI ----------------
 try:
-    from chromadb import Client
-    from chromadb.config import Settings
+    from chromadb import PersistentClient
     from chromadb.utils import embedding_functions
     from openai import OpenAI
-except Exception as e:
+except:
     raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
 
-# NEW Chroma client — FIXED (no deprecated API)
-chroma_client = Client(
-    Settings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory="chroma_db"
-    )
-)
+# NEW Chroma client (fix for deprecated API)
+chroma_client = PersistentClient(path="chroma_db")
 
 openai_client = OpenAI(api_key=OPENAI_KEY)
-
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_KEY,
     model_name="text-embedding-3-large"
@@ -97,7 +90,7 @@ def extract_social_links_from_html(html):
 
     return social
 
-# ---------------- Contact Extraction ----------------
+# ---------------- Contact Extraction (Multi) ----------------
 def extract_all_emails(text):
     return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
 
@@ -126,7 +119,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
     return chunks
 
-# ---------------- Sitemap ----------------
+# ---------------- Sitemap (Improved) ----------------
 def get_urls_from_sitemap(url):
     try:
         sitemap_list = [
