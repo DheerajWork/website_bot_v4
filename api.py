@@ -8,9 +8,9 @@ from website_bot import (
     clean_text,
     chunk_text,
     rag_extract,
-    extract_email,
-    extract_phone,
-    extract_address,
+    extract_all_emails,
+    extract_all_phones,
+    extract_all_addresses,
     extract_social_links_from_html
 )
 from bs4 import BeautifulSoup
@@ -50,6 +50,7 @@ def scrape(request: URLRequest):
             "Twitter / X": ""
         }
 
+        # ---------------- Scrape each main page ----------------
         for page in main_pages:
             html = fetch_page(page)
 
@@ -59,36 +60,44 @@ def scrape(request: URLRequest):
                 if v and not all_social[k]:
                     all_social[k] = v
 
-            # Clean text
+            # Clean and extract text
             soup = BeautifulSoup(html, "html.parser")
             [s.extract() for s in soup(["script", "style", "noscript"])]
             all_text += " " + clean_text(soup.get_text(" ", strip=True))
 
+        # Clean combined text
         all_text = clean_text(all_text)
+
+        # Chunk text for RAG processing
         chunks = chunk_text(all_text)
 
-        # RAG extraction
+        # ---------------- Run RAG extraction ----------------
         data = rag_extract(chunks, site_url)
 
-        # Fallbacks for missing data
-        data["Email"] = data.get("Email") or extract_email(all_text)
-        data["Phone"] = data.get("Phone") or extract_phone(all_text)
-        data["Address"] = data.get("Address") or extract_address(all_text)
+        # Fallback extraction (MULTIPLE emails/phones/addresses)
+        if not data.get("Email"):
+            data["Email"] = extract_all_emails(all_text)
+
+        if not data.get("Phone"):
+            data["Phone"] = extract_all_phones(all_text)
+
+        if not data.get("Address"):
+            data["Address"] = extract_all_addresses(all_text)
 
         # Merge social media links
         for k, v in all_social.items():
             if v:
                 data[k] = v
 
-        # Ensure all keys exist
+        # Ensure required fields always exist
         defaults = {
             "Business Name": "",
             "About Us": "",
             "Main Services": [],
             "Description": "",
-            "Email": "",
-            "Phone": "",
-            "Address": "",
+            "Email": [],
+            "Phone": [],
+            "Address": [],
             "Facebook": "",
             "Instagram": "",
             "LinkedIn": "",
