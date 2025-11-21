@@ -3,24 +3,15 @@
 SUPER OPTIMIZED WEBSITE BOT — FINAL VERSION
 Best multi-office extraction, perfect contacts, with improved LLM accuracy
 """
-# --------------------------------------------------------------
-#  FIXED VERSION — SQLITE DISABLED (REQUIRED FOR CENTOS SERVERS)
-# --------------------------------------------------------------
+#21-11
 
-# ========= CRITICAL FIX: DISABLE SQLITE BEFORE ANY IMPORTS =========
-import os
-os.environ["CHROMA_DISABLE_SQLITE"] = "true"
-# ===================================================================
-
-import re
-import json
-import urllib.parse
+import os, re, time, json, urllib.parse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import requests
 import concurrent.futures
 
-# ---------------- Load Keys ----------------
+# ---------------- Config ----------------
 load_dotenv(override=True)
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 FIRECRAWL_KEY = os.getenv("FIRECRAWL_API_KEY")
@@ -29,41 +20,39 @@ CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
 
 if not OPENAI_KEY:
-    raise SystemExit("❌ OPENAI_API_KEY missing in .env")
-
+    raise SystemExit("❌ OPENAI_API_KEY not found in .env")
 if not FIRECRAWL_KEY:
-    print("⚠️ FIRECRAWL_API_KEY missing — Firecrawl fallback disabled")
+    print("⚠️ FIRECRAWL_API_KEY not found, Firecrawl fallback disabled")
 
 # ---------------- ChromaDB & OpenAI ----------------
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
-from openai import OpenAI
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    from openai import OpenAI
+except:
+    raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
 
-# Use DuckDB only (NO SQLITE)
-chroma_client = chromadb.Client(
-    Settings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory="chroma_db"
-    )
-)
-
+chroma_client = chromadb.Client()
 openai_client = OpenAI(api_key=OPENAI_KEY)
-
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=OPENAI_KEY,
+    api_key=OPENAI_KEY, 
     model_name="text-embedding-3-large"
 )
 
-# ---------------- Helper ----------------
+# ---------------- Helper Functions ----------------
 def clean_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
-# ---------------- Fetch Page ----------------
+# Fast Playwright Fetch
 def fetch_page(url: str) -> str:
+    """
+    First try Requests.
+    If blocked, try Firecrawl HTML extraction (if API key exists).
+    """
+    # 1. Normal fetch
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
             "Accept-Language": "en-US,en;q=0.9",
         }
         r = requests.get(url, headers=headers, timeout=20)
@@ -72,7 +61,7 @@ def fetch_page(url: str) -> str:
     except:
         pass
 
-    # Firecrawl fallback
+    # 2. Firecrawl Fallback (if available)
     if FIRECRAWL_KEY:
         try:
             fc_url = "https://api.firecrawl.dev/v2/scrape"
@@ -80,7 +69,8 @@ def fetch_page(url: str) -> str:
             payload = {"url": url, "formats": ["html"]}
 
             fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
-            return fc.json().get("html", "")
+            html = fc.json().get("html", "")
+            return html
         except:
             pass
 
@@ -93,18 +83,14 @@ def extract_social_links_from_html(html):
 
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if "facebook.com" in href:
-            social["Facebook"] = href
-        if "instagram.com" in href:
-            social["Instagram"] = href
-        if "linkedin.com" in href:
-            social["LinkedIn"] = href
-        if "twitter.com" in href or "x.com" in href:
-            social["Twitter / X"] = href
+        if "facebook.com" in href: social["Facebook"] = href
+        if "instagram.com" in href: social["Instagram"] = href
+        if "linkedin.com" in href: social["LinkedIn"] = href
+        if "twitter.com" in href or "x.com" in href: social["Twitter / X"] = href
 
     return social
 
-# ---------------- Contact Extraction ----------------
+# ---------------- Contact Extraction (Multi) ----------------
 def extract_all_emails(text):
     return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
 
@@ -115,7 +101,7 @@ def extract_all_addresses(text):
     pattern = r"\d{1,4}\s+[A-Za-z0-9\s,.-]{5,100}"
     return list(set(re.findall(pattern, text)))
 
-# ---------------- Chunking ----------------
+# ---------------- Smart Chunking ----------------
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     text = clean_text(text)
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -133,19 +119,37 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
     return chunks
 
-# ---------------- Sitemap ----------------
+# ---------------- Sitemap (Improved) ----------------
 def get_urls_from_sitemap(url):
     try:
-        smaps = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml"]
+        sitemap_list = [
+            "/sitemap.xml",
+            "/sitemap_index.xml",
+            "/sitemap-index.xml"
+        ]
         urls = []
 
-        for path in smaps:
-            sm = urllib.parse.urljoin(url, path)
+        for s in sitemap_list:
+            sm = urllib.parse.urljoin(url, s)
             r = requests.get(sm, timeout=10)
             if r.status_code != 200:
                 continue
 
             soup = BeautifulSoup(r.text, "xml")
+
+            # sitemap index support
+            for sub in soup.find_all("sitemap"):
+                loc = sub.find("loc")
+                if loc:
+                    sub_url = loc.get_text().strip()
+                    try:
+                        sub_r = requests.get(sub_url, timeout=10)
+                        sub_soup = BeautifulSoup(sub_r.text, "xml")
+                        urls += [x.get_text().strip() for x in sub_soup.find_all("loc")]
+                    except:
+                        pass
+
+            # normal URLs
             urls += [x.get_text().strip() for x in soup.find_all("loc")]
 
         return list(set(urls))
@@ -155,28 +159,27 @@ def get_urls_from_sitemap(url):
 def get_urls_from_firecrawl(base_url):
     if not FIRECRAWL_KEY:
         return []
+    url = "https://api.firecrawl.dev/v2/map"
+    headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
+    payload = {"url": base_url}
+
     try:
-        r = requests.post(
-            "https://api.firecrawl.dev/v2/map",
-            json={"url": base_url},
-            headers={"Authorization": f"Bearer {FIRECRAWL_KEY}"},
-            timeout=30
-        )
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
         return [x["url"] for x in r.json().get("links", [])]
     except:
         return []
 
 def get_site_urls(base):
-    sm = get_urls_from_sitemap(base)
-    if sm:
-        print(f"✅ Sitemap URLs: {len(sm)}")
-        return sm
+    s = get_urls_from_sitemap(base)
+    if s:
+        print(f"✅ Sitemap URLs: {len(s)}")
+        return s
 
-    print("⚠️ No sitemap — using Firecrawl")
-    fc = get_urls_from_firecrawl(base)
-    if fc:
-        print(f"🔥 Firecrawl URLs: {len(fc)}")
-        return fc
+    print("⚠️ Sitemap not found — trying Firecrawl…")
+    f = get_urls_from_firecrawl(base)
+    if f:
+        print(f"🔥 Firecrawl URLs: {len(f)}")
+        return f
 
     return [base]
 
@@ -187,51 +190,51 @@ def select_main_pages(urls, base):
 
     for u in urls:
         ul = u.lower()
-        if "about" in ul or "contact" in ul:
-            pages.append(u)
+        if "about" in ul: pages.append(u)
+        if "contact" in ul: pages.append(u)
 
     if base not in pages:
         pages.insert(0, base)
 
     return pages[:3]
 
-# ---------------- RAG Collection Name Fix ----------------
+# ---------------- RAG Extraction ----------------
 def sanitize_collection_name(url):
+    # Replace invalid characters
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", url)
+
+    # Remove leading invalid chars
     name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
+
+    # Remove trailing invalid chars
     name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
+
     if not name:
         name = "default"
+
     return f"collection_{name}"
 
-# ---------------- RAG Extraction ----------------
+
 def rag_extract(chunks, site_url):
     cname = sanitize_collection_name(site_url)
-    coll = chroma_client.get_or_create_collection(
-        name=cname,
-        embedding_function=openai_ef
-    )
+    coll = chroma_client.get_or_create_collection(name=cname, embedding_function=openai_ef)
 
     for i, ch in enumerate(chunks):
-        coll.add(
-            documents=[ch],
-            metadatas=[{"chunk": i}],
-            ids=[f"{site_url}_{i}"]
-        )
+        coll.add(documents=[ch], metadatas=[{"chunk": i}], ids=[f"{site_url}_{i}"])
 
-    res = coll.query(query_texts=["Extract company details."], n_results=4)
+    res = coll.query(query_texts=["Extract company details and all office locations."], n_results=4)
     context = " ".join(res.get("documents", [[]])[0])
 
     prompt = f"""
-Extract structured business data ONLY in JSON.
+You are a world-class business data extractor.
 
-Fields:
+Extract ALL fields with multiple values where available:
 - Business Name
 - About Us
-- Main Services (LIST)
-- Email (LIST)
+- Main Services (LIST, never string)
+- Email (LIST, return ALL emails)
 - Phone (LIST)
-- Address (LIST)
+- Address (LIST of full addresses)
 - Facebook
 - Instagram
 - LinkedIn
@@ -239,25 +242,27 @@ Fields:
 - Description
 - URL: {site_url}
 
-Use ONLY this text:
+Return clean JSON ONLY.
+Use ONLY the following text:
+
 {context}
 """
 
-    result = openai_client.chat.completions.create(
+    r = openai_client.chat.completions.create(
         model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role":"user","content":prompt}],
         temperature=0
     )
 
-    raw = result.choices[0].message.content
-    raw = re.sub(r"```json|```", "", raw)
+    out = r.choices[0].message.content
+    out = re.sub(r"```json|```", "", out)
 
     try:
-        return json.loads(raw)
+        return json.loads(out)
     except:
-        return {"raw": raw}
+        return {"raw": out}
 
-# ---------------- Standalone Run ----------------
+# ---------------- Main Flow ----------------
 if __name__ == "__main__":
     site_url = input("Enter website URL: ").strip()
     if not site_url.startswith("http"):
@@ -274,24 +279,27 @@ if __name__ == "__main__":
     all_text = ""
     all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
-    def scrape_single(page):
+    # ---------------- Parallel Scrape ----------------
+    def scrape_single_page(page):
         html = fetch_page(page)
-        soc = extract_social_links_from_html(html)
+        social = extract_social_links_from_html(html)
         soup = BeautifulSoup(html, "lxml")
         [s.extract() for s in soup(["script", "style", "noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))
-        return text, soc
+        return text, social
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as exe:
-        results = exe.map(scrape_single, main_pages)
+        results = list(exe.map(scrape_single_page, main_pages))
 
-    for text, soc in results:
+    for text, social in results:
         all_text += " " + text
-        for k, v in soc.items():
+        for k, v in social.items():
             if v and not all_social[k]:
                 all_social[k] = v
 
     all_text = clean_text(all_text)
+
+    # Prevent hallucination by removing duplicates
     all_text = " ".join(dict.fromkeys(all_text.split()))
 
     chunks = chunk_text(all_text)
@@ -299,10 +307,12 @@ if __name__ == "__main__":
     print("\n🧠 Running RAG…")
     data = rag_extract(chunks, site_url)
 
+    # fallback extraction — MULTIPLE
     data["Email"] = data.get("Email") or extract_all_emails(all_text)
     data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
     data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
+    # social links
     for k, v in all_social.items():
         if v:
             data[k] = v
