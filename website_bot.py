@@ -5,7 +5,11 @@ Best multi-office extraction, perfect contacts, with improved LLM accuracy
 """
 #21-11
 
-import os, re, time, json, urllib.parse
+import os
+import re
+import time
+import json
+import urllib.parse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import requests
@@ -26,23 +30,28 @@ if not FIRECRAWL_KEY:
 
 # ---------------- ChromaDB & OpenAI ----------------
 try:
-    from chromadb import Client
-    from chromadb.config import Settings
+    from chromadb import Client as ChromaClient
     from chromadb.utils import embedding_functions
     from openai import OpenAI
-except:
-    raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
+except Exception as e:
+    raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml") from e
 
-# NEW Chroma client (latest API — not deprecated)
-chroma_client = Client(
-    Settings(
-        chroma_db_impl="duckdb",
-        persist_directory="chroma_db"
-    )
-)
-
-# NEW Chroma client (fix for deprecated API)
-chroma_client = PersistentClient(path="chroma_db")
+# Try to create a Chroma client using the current (non-deprecated) API.
+# If it fails (old config / migration required), we keep chroma_client = None
+# so the rest of the script can still run (with a fallback).
+chroma_client = None
+try:
+    chroma_client = ChromaClient()
+    # create a default collection placeholder (will be created per-site later)
+    # This is optional; we create collections dynamically in rag_extract.
+    # chroma_client.get_or_create_collection(name="web_chunks")
+    print("✅ Chroma client initialized.")
+except Exception as err:
+    # Keep the client None — script will still run using a quick fallback.
+    print("⚠️ Could not initialize Chroma client (deprecated/config error or missing migration).")
+    print("Chroma error:", str(err))
+    print("If you have data to migrate run: pip install chroma-migrate && chroma-migrate")
+    print("Or update your chromadb usage to the new client API. Continuing without persistent Chroma.")
 
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
@@ -54,7 +63,7 @@ openai_ef = embedding_functions.OpenAIEmbeddingFunction(
 def clean_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
-# Fast Playwright Fetch
+# Fast Requests + Firecrawl Fetch
 def fetch_page(url: str) -> str:
     """
     First try Requests.
@@ -71,6 +80,7 @@ def fetch_page(url: str) -> str:
     except:
         pass
 
+    # Firecrawl fallback
     if FIRECRAWL_KEY:
         try:
             fc_url = "https://api.firecrawl.dev/v2/scrape"
@@ -87,32 +97,38 @@ def fetch_page(url: str) -> str:
 
 # ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html or "", "lxml")
     social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if "facebook.com" in href: social["Facebook"] = href
-        if "instagram.com" in href: social["Instagram"] = href
-        if "linkedin.com" in href: social["LinkedIn"] = href
-        if "twitter.com" in href or "x.com" in href: social["Twitter / X"] = href
+        if "facebook.com" in href and not social["Facebook"]:
+            social["Facebook"] = href
+        if "instagram.com" in href and not social["Instagram"]:
+            social["Instagram"] = href
+        if "linkedin.com" in href and not social["LinkedIn"]:
+            social["LinkedIn"] = href
+        if ("twitter.com" in href or "x.com" in href) and not social["Twitter / X"]:
+            social["Twitter / X"] = href
 
     return social
 
 # ---------------- Contact Extraction (Multi) ----------------
 def extract_all_emails(text):
-    return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
+    return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text or "")))
 
 def extract_all_phones(text):
-    return list(set(re.findall(r"\+?\d[\d\-\s()]{8,15}", text)))
+    return list(set(re.findall(r"\+?\d[\d\-\s()]{8,15}", text or "")))
 
 def extract_all_addresses(text):
     pattern = r"\d{1,4}\s+[A-Za-z0-9\s,.-]{5,100}"
-    return list(set(re.findall(pattern, text)))
+    return list(set(re.findall(pattern, text or "")))
 
 # ---------------- Smart Chunking ----------------
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     text = clean_text(text)
+    if not text:
+        return []
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks, current = [], ""
 
@@ -215,24 +231,45 @@ def sanitize_collection_name(url):
     return f"collection_{name}"
 
 def rag_extract(chunks, site_url):
-    cname = sanitize_collection_name(site_url)
-    coll = chroma_client.get_or_create_collection(
-        name=cname,
-        embedding_function=openai_ef
-    )
+    """
+    If Chroma is available we index/query there.
+    If not available, fall back to joining top chunks as context.
+    """
+    context = ""
+    if chroma_client:
+        try:
+            cname = sanitize_collection_name(site_url)
+            coll = chroma_client.get_or_create_collection(
+                name=cname,
+                embedding_function=openai_ef
+            )
 
-    for i, ch in enumerate(chunks):
-        coll.add(
-            documents=[ch],
-            metadatas=[{"chunk": i}],
-            ids=[f"{site_url}_{i}"]
-        )
+            # add chunks (upsert)
+            for i, ch in enumerate(chunks):
+                coll.add(
+                    documents=[ch],
+                    metadatas=[{"chunk": i}],
+                    ids=[f"{site_url}_{i}"]
+                )
 
-    res = coll.query(
-        query_texts=["Extract company details and all office locations."],
-        n_results=4
-    )
-    context = " ".join(res.get("documents", [[]])[0])
+            # query
+            res = coll.query(
+                query_texts=["Extract company details and all office locations."],
+                n_results=4
+            )
+            # attempt to get returned documents safely
+            docs_list = res.get("documents", [])
+            if docs_list and isinstance(docs_list, list):
+                # docs_list is list of lists (one per query). join first set.
+                context = " ".join(docs_list[0]) if docs_list[0] else ""
+            else:
+                context = " ".join(chunks[:4])
+        except Exception as e:
+            print("⚠️ Chroma operation failed, falling back. Error:", str(e))
+            context = " ".join(chunks[:4])
+    else:
+        # simple fallback context if Chromadb not available
+        context = " ".join(chunks[:4])
 
     prompt = f"""
 You are a world-class business data extractor.
@@ -257,9 +294,10 @@ Use ONLY the following text:
 {context}
 """
 
+    # call OpenAI to extract structured JSON
     r = openai_client.chat.completions.create(
         model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role":"user","content":prompt}],
         temperature=0
     )
 
@@ -288,10 +326,11 @@ if __name__ == "__main__":
     all_text = ""
     all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
+    # ---------------- Parallel Scrape ----------------
     def scrape_single_page(page):
         html = fetch_page(page)
         social = extract_social_links_from_html(html)
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html or "", "lxml")
         [s.extract() for s in soup(["script", "style", "noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))
         return text, social
@@ -300,22 +339,26 @@ if __name__ == "__main__":
         results = list(exe.map(scrape_single_page, main_pages))
 
     for text, social in results:
-        all_text += " " + text
+        all_text += " " + (text or "")
         for k, v in social.items():
             if v and not all_social[k]:
                 all_social[k] = v
 
     all_text = clean_text(all_text)
+    # Prevent hallucination by removing duplicates
     all_text = " ".join(dict.fromkeys(all_text.split()))
+
     chunks = chunk_text(all_text)
 
     print("\n🧠 Running RAG…")
     data = rag_extract(chunks, site_url)
 
+    # fallback extraction — MULTIPLE
     data["Email"] = data.get("Email") or extract_all_emails(all_text)
     data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
     data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
+    # social links
     for k, v in all_social.items():
         if v:
             data[k] = v
