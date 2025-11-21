@@ -97,7 +97,7 @@ def fetch_page(url: str) -> str:
 
 # ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = BeautifulSoup(html or "", "html.parser")
     social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
     for a in soup.find_all("a", href=True):
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     def scrape_single_page(page):
         html = fetch_page(page)
         social = extract_social_links_from_html(html)
-        soup = BeautifulSoup(html or "", "lxml")
+        soup = BeautifulSoup(html or "", "html.parser")
         [s.extract() for s in soup(["script", "style", "noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))
         return text, social
