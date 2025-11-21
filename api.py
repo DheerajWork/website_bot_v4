@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
+
+import os
+
+# ============================================================
+# CRITICAL FIX: Disable SQLite BEFORE importing website_bot
+# ============================================================
+os.environ["CHROMA_DISABLE_SQLITE"] = "true"
+# ============================================================
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# =============== CRITICAL FIX: DISABLE SQLITE FIRST ===============
-import chromadb
-from chromadb.api.shared import System
-System.set_chromadb_env("CHROMA_DISABLE_SQLITE", "true")
-# ==============================================================
-
-# Now it is safe to import website_bot
+# Import the full scraper logic AFTER sqlite is disabled
 from website_bot import (
     get_site_urls,
     select_main_pages,
@@ -24,6 +28,9 @@ from website_bot import (
 from bs4 import BeautifulSoup
 import json
 
+# -------------------------------------------------------------
+# FastAPI App
+# -------------------------------------------------------------
 app = FastAPI(title="Website Info Extractor API")
 
 # ---------------- Request Model ----------------
@@ -34,6 +41,7 @@ class URLRequest(BaseModel):
 @app.get("/")
 def root():
     return {"message": "Website Info Extractor API is running 🚀"}
+
 
 # ---------------- Scrape Endpoint ----------------
 @app.post("/scrape")
@@ -47,6 +55,7 @@ def scrape(request: URLRequest):
 
     try:
         print(f"🔍 Fetching URLs for: {site_url}")
+
         all_urls = get_site_urls(site_url)
         main_pages = select_main_pages(all_urls, site_url)
 
@@ -62,37 +71,34 @@ def scrape(request: URLRequest):
         for page in main_pages:
             html = fetch_page(page)
 
-            # Extract social media links
+            # Social links
             page_social = extract_social_links_from_html(html)
             for k, v in page_social.items():
-                if v and not all_social[k]:
+                if v:
                     all_social[k] = v
 
-            # Clean text
+            # Extract text
             soup = BeautifulSoup(html, "html.parser")
             [s.extract() for s in soup(["script", "style", "noscript"])]
             all_text += " " + clean_text(soup.get_text(" ", strip=True))
 
-        # Clean combined text
         all_text = clean_text(all_text)
-
-        # Chunk text for RAG processing
         chunks = chunk_text(all_text)
 
         # ---------------- Run RAG extraction ----------------
         data = rag_extract(chunks, site_url)
 
-        # Fallback extraction (MULTIPLE emails/phones/addresses)
+        # fallback extractions
         data["Email"] = data.get("Email") or extract_all_emails(all_text)
         data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
         data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
-        # Merge social media links
+        # Add social links
         for k, v in all_social.items():
             if v:
                 data[k] = v
 
-        # Ensure required fields always exist
+        # Ensure required fields
         defaults = {
             "Business Name": "",
             "About Us": "",
@@ -108,7 +114,7 @@ def scrape(request: URLRequest):
             "URL": site_url
         }
         for k, v in defaults.items():
-            if k not in data or not data[k]:
+            if k not in data or data[k] is None:
                 data[k] = v
 
         return {
