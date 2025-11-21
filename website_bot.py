@@ -26,11 +26,20 @@ if not FIRECRAWL_KEY:
 
 # ---------------- ChromaDB & OpenAI ----------------
 try:
-    from chromadb import PersistentClient
+    from chromadb import Client
+    from chromadb.config import Settings
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except:
     raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
+
+# NEW Chroma client (latest API — not deprecated)
+chroma_client = Client(
+    Settings(
+        chroma_db_impl="duckdb",
+        persist_directory="chroma_db"
+    )
+)
 
 # NEW Chroma client (fix for deprecated API)
 chroma_client = PersistentClient(path="chroma_db")
