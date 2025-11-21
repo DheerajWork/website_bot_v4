@@ -26,16 +26,18 @@ if not FIRECRAWL_KEY:
 
 # ---------------- ChromaDB & OpenAI ----------------
 try:
-    import chromadb
+    from chromadb import PersistentClient
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except:
     raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml")
 
-chroma_client = chromadb.Client()
+# NEW Chroma client (fix for deprecated API)
+chroma_client = PersistentClient(path="chroma_db")
+
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=OPENAI_KEY, 
+    api_key=OPENAI_KEY,
     model_name="text-embedding-3-large"
 )
 
@@ -49,7 +51,6 @@ def fetch_page(url: str) -> str:
     First try Requests.
     If blocked, try Firecrawl HTML extraction (if API key exists).
     """
-    # 1. Normal fetch
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -61,7 +62,6 @@ def fetch_page(url: str) -> str:
     except:
         pass
 
-    # 2. Firecrawl Fallback (if available)
     if FIRECRAWL_KEY:
         try:
             fc_url = "https://api.firecrawl.dev/v2/scrape"
@@ -137,7 +137,6 @@ def get_urls_from_sitemap(url):
 
             soup = BeautifulSoup(r.text, "xml")
 
-            # sitemap index support
             for sub in soup.find_all("sitemap"):
                 loc = sub.find("loc")
                 if loc:
@@ -149,7 +148,6 @@ def get_urls_from_sitemap(url):
                     except:
                         pass
 
-            # normal URLs
             urls += [x.get_text().strip() for x in soup.find_all("loc")]
 
         return list(set(urls))
@@ -200,29 +198,31 @@ def select_main_pages(urls, base):
 
 # ---------------- RAG Extraction ----------------
 def sanitize_collection_name(url):
-    # Replace invalid characters
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", url)
-
-    # Remove leading invalid chars
     name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
-
-    # Remove trailing invalid chars
     name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
-
     if not name:
         name = "default"
-
     return f"collection_{name}"
-
 
 def rag_extract(chunks, site_url):
     cname = sanitize_collection_name(site_url)
-    coll = chroma_client.get_or_create_collection(name=cname, embedding_function=openai_ef)
+    coll = chroma_client.get_or_create_collection(
+        name=cname,
+        embedding_function=openai_ef
+    )
 
     for i, ch in enumerate(chunks):
-        coll.add(documents=[ch], metadatas=[{"chunk": i}], ids=[f"{site_url}_{i}"])
+        coll.add(
+            documents=[ch],
+            metadatas=[{"chunk": i}],
+            ids=[f"{site_url}_{i}"]
+        )
 
-    res = coll.query(query_texts=["Extract company details and all office locations."], n_results=4)
+    res = coll.query(
+        query_texts=["Extract company details and all office locations."],
+        n_results=4
+    )
     context = " ".join(res.get("documents", [[]])[0])
 
     prompt = f"""
@@ -231,10 +231,10 @@ You are a world-class business data extractor.
 Extract ALL fields with multiple values where available:
 - Business Name
 - About Us
-- Main Services (LIST, never string)
-- Email (LIST, return ALL emails)
+- Main Services (LIST)
+- Email (LIST)
 - Phone (LIST)
-- Address (LIST of full addresses)
+- Address (LIST)
 - Facebook
 - Instagram
 - LinkedIn
@@ -250,7 +250,7 @@ Use ONLY the following text:
 
     r = openai_client.chat.completions.create(
         model="gpt-4.1",
-        messages=[{"role":"user","content":prompt}],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
 
@@ -279,7 +279,6 @@ if __name__ == "__main__":
     all_text = ""
     all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
-    # ---------------- Parallel Scrape ----------------
     def scrape_single_page(page):
         html = fetch_page(page)
         social = extract_social_links_from_html(html)
@@ -298,21 +297,16 @@ if __name__ == "__main__":
                 all_social[k] = v
 
     all_text = clean_text(all_text)
-
-    # Prevent hallucination by removing duplicates
     all_text = " ".join(dict.fromkeys(all_text.split()))
-
     chunks = chunk_text(all_text)
 
     print("\n🧠 Running RAG…")
     data = rag_extract(chunks, site_url)
 
-    # fallback extraction — MULTIPLE
     data["Email"] = data.get("Email") or extract_all_emails(all_text)
     data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
     data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
-    # social links
     for k, v in all_social.items():
         if v:
             data[k] = v
