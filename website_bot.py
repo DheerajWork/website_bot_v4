@@ -3,9 +3,18 @@
 SUPER OPTIMIZED WEBSITE BOT — FINAL VERSION
 Best multi-office extraction, perfect contacts, with improved LLM accuracy
 """
-#21-11
+# --------------------------------------------------------------
+#  FIXED VERSION — SQLITE DISABLED (REQUIRED FOR CENTOS SERVERS)
+# --------------------------------------------------------------
 
-import os, re, json, urllib.parse
+# ========= CRITICAL FIX: DISABLE SQLITE BEFORE ANY IMPORTS =========
+import os
+os.environ["CHROMA_DISABLE_SQLITE"] = "true"
+# ===================================================================
+
+import re
+import json
+import urllib.parse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import requests
@@ -20,24 +29,18 @@ CHUNK_SIZE = 180
 CHUNK_OVERLAP = 30
 
 if not OPENAI_KEY:
-    raise SystemExit("❌ OPENAI_API_KEY missing")
+    raise SystemExit("❌ OPENAI_API_KEY missing in .env")
+
 if not FIRECRAWL_KEY:
     print("⚠️ FIRECRAWL_API_KEY missing — Firecrawl fallback disabled")
 
-# ---------------- ChromaDB (SQLITE DISABLED) ----------------
-try:
-    import chromadb
-    from chromadb.config import Settings
-    from chromadb.api.shared import System
-    from chromadb.utils import embedding_functions
-    from openai import OpenAI
-except Exception as e:
-    raise SystemExit(f"Install missing packages: pip install beautifulsoup4 chromadb openai lxml\nError: {str(e)}")
+# ---------------- ChromaDB & OpenAI ----------------
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+from openai import OpenAI
 
-# Disable SQLITE completely
-System.set_chromadb_env("CHROMA_DISABLE_SQLITE", "true")
-
-# Use DuckDB backend only
+# Use DuckDB only (NO SQLITE)
 chroma_client = chromadb.Client(
     Settings(
         chroma_db_impl="duckdb+parquet",
@@ -69,11 +72,13 @@ def fetch_page(url: str) -> str:
     except:
         pass
 
+    # Firecrawl fallback
     if FIRECRAWL_KEY:
         try:
             fc_url = "https://api.firecrawl.dev/v2/scrape"
             headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
             payload = {"url": url, "formats": ["html"]}
+
             fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
             return fc.json().get("html", "")
         except:
@@ -81,20 +86,25 @@ def fetch_page(url: str) -> str:
 
     return ""
 
-# ---------------- Extractors ----------------
+# ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
     soup = BeautifulSoup(html, "lxml")
     social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        if "facebook.com" in href: social["Facebook"] = href
-        if "instagram.com" in href: social["Instagram"] = href
-        if "linkedin.com" in href: social["LinkedIn"] = href
-        if "twitter.com" in href or "x.com" in href: social["Twitter / X"] = href
+        if "facebook.com" in href:
+            social["Facebook"] = href
+        if "instagram.com" in href:
+            social["Instagram"] = href
+        if "linkedin.com" in href:
+            social["LinkedIn"] = href
+        if "twitter.com" in href or "x.com" in href:
+            social["Twitter / X"] = href
 
     return social
 
+# ---------------- Contact Extraction ----------------
 def extract_all_emails(text):
     return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
 
@@ -117,6 +127,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         else:
             chunks.append(current.strip())
             current = s
+
     if current:
         chunks.append(current.strip())
 
@@ -145,13 +156,13 @@ def get_urls_from_firecrawl(base_url):
     if not FIRECRAWL_KEY:
         return []
     try:
-        f = requests.post(
+        r = requests.post(
             "https://api.firecrawl.dev/v2/map",
             json={"url": base_url},
             headers={"Authorization": f"Bearer {FIRECRAWL_KEY}"},
             timeout=30
         )
-        return [x["url"] for x in f.json().get("links", [])]
+        return [x["url"] for x in r.json().get("links", [])]
     except:
         return []
 
@@ -169,19 +180,22 @@ def get_site_urls(base):
 
     return [base]
 
-# ---------------- Pick Pages ----------------
+# ---------------- Main Page Selection ----------------
 def select_main_pages(urls, base):
     pages = []
     base = base.rstrip("/")
+
     for u in urls:
         ul = u.lower()
         if "about" in ul or "contact" in ul:
             pages.append(u)
+
     if base not in pages:
         pages.insert(0, base)
+
     return pages[:3]
 
-# ---------------- Fix Collection Name ----------------
+# ---------------- RAG Collection Name Fix ----------------
 def sanitize_collection_name(url):
     name = re.sub(r"[^a-zA-Z0-9._-]", "_", url)
     name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
@@ -193,7 +207,10 @@ def sanitize_collection_name(url):
 # ---------------- RAG Extraction ----------------
 def rag_extract(chunks, site_url):
     cname = sanitize_collection_name(site_url)
-    coll = chroma_client.get_or_create_collection(name=cname, embedding_function=openai_ef)
+    coll = chroma_client.get_or_create_collection(
+        name=cname,
+        embedding_function=openai_ef
+    )
 
     for i, ch in enumerate(chunks):
         coll.add(
@@ -240,7 +257,7 @@ Use ONLY this text:
     except:
         return {"raw": raw}
 
-# ---------------- Main Flow ----------------
+# ---------------- Standalone Run ----------------
 if __name__ == "__main__":
     site_url = input("Enter website URL: ").strip()
     if not site_url.startswith("http"):
