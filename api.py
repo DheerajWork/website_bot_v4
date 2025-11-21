@@ -1,5 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+# =============== CRITICAL FIX: DISABLE SQLITE FIRST ===============
+import chromadb
+from chromadb.api.shared import System
+System.set_chromadb_env("CHROMA_DISABLE_SQLITE", "true")
+# ==============================================================
+
+# Now it is safe to import website_bot
 from website_bot import (
     get_site_urls,
     select_main_pages,
@@ -12,6 +20,7 @@ from website_bot import (
     extract_all_addresses,
     extract_social_links_from_html
 )
+
 from bs4 import BeautifulSoup
 import json
 
@@ -59,7 +68,7 @@ def scrape(request: URLRequest):
                 if v and not all_social[k]:
                     all_social[k] = v
 
-            # Clean and extract text
+            # Clean text
             soup = BeautifulSoup(html, "html.parser")
             [s.extract() for s in soup(["script", "style", "noscript"])]
             all_text += " " + clean_text(soup.get_text(" ", strip=True))
@@ -74,14 +83,9 @@ def scrape(request: URLRequest):
         data = rag_extract(chunks, site_url)
 
         # Fallback extraction (MULTIPLE emails/phones/addresses)
-        if not data.get("Email"):
-            data["Email"] = extract_all_emails(all_text)
-
-        if not data.get("Phone"):
-            data["Phone"] = extract_all_phones(all_text)
-
-        if not data.get("Address"):
-            data["Address"] = extract_all_addresses(all_text)
+        data["Email"] = data.get("Email") or extract_all_emails(all_text)
+        data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
+        data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
         # Merge social media links
         for k, v in all_social.items():
