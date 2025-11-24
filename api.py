@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
 from website_bot import (
     get_site_urls,
@@ -17,17 +17,22 @@ import json
 
 app = FastAPI(title="Website Info Extractor API")
 
+# -------------------------------------------------
+# Create router with /api prefix
+# -------------------------------------------------
+router = APIRouter(prefix="/api")
+
 # ---------------- Request Model ----------------
 class URLRequest(BaseModel):
     url: str
 
 # ---------------- Root ----------------
-@app.get("/")
+@router.get("/")
 def root():
     return {"message": "Website Info Extractor API is running 🚀"}
 
 # ---------------- Scrape Endpoint ----------------
-@app.post("/scrape")
+@router.post("/scrape")
 def scrape(request: URLRequest):
     site_url = request.url.strip()
     if not site_url:
@@ -115,3 +120,8 @@ def scrape(request: URLRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error scraping site: {str(e)}")
+
+# -------------------------------------------------
+# Register router
+# -------------------------------------------------
+app.include_router(router)
