@@ -33,7 +33,8 @@ try:
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except Exception as e:
-    raise SystemExit("Install required packages: pip install beautifulsoup4 chromadb openai lxml") from e
+    print("Import error:", e)
+    raise SystemExit(f"Error importing modules: {e}")
 
 # Try to create a Chroma client using the current (non-deprecated) API.
 # If it fails (old config / migration required), we keep chroma_client = None
