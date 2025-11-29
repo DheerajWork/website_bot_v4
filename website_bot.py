@@ -121,8 +121,31 @@ def extract_all_phones(text):
     return list(set(re.findall(r"\+?\d[\d\-\s()]{8,15}", text or "")))
 
 def extract_all_addresses(text):
-    pattern = r"\d{1,4}\s+[A-Za-z0-9\s,.-]{5,100}"
-    return list(set(re.findall(pattern, text or "")))
+    """
+    Strict regex fallback for addresses - only extracts if it contains address keywords.
+    """
+    if not text:
+        return []
+    
+    # Pattern: starts with 1-4 digits, followed by address-like text
+    pattern = r"\d{1,4}[,\s]+[A-Za-z0-9\s,.-]{20,200}"
+    potential_addresses = re.findall(pattern, text)
+    
+    # Only keep addresses with proper keywords
+    valid_addresses = []
+    for addr in potential_addresses:
+        addr = addr.strip()
+        
+        # Must contain address keywords
+        if re.search(r'\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|complex|building|floor|suite|office|near|opposite|highway|hwy|mall|square|circle|nagar|society)\b', addr, re.IGNORECASE):
+            # Skip if it has dates/years
+            if not re.search(r'\b(19|20)\d{2}\b', addr):
+                # Skip if too many digits (phone numbers)
+                digit_ratio = sum(c.isdigit() for c in addr) / len(addr)
+                if digit_ratio < 0.3:
+                    valid_addresses.append(addr)
+    
+    return list(set(valid_addresses))
 
 # ---------------- Smart Chunking ----------------
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
@@ -252,10 +275,10 @@ def rag_extract(chunks, site_url):
                     ids=[f"{site_url}_{i}"]
                 )
 
-            # query
+            # query - get more results and specifically look for contact/address info
             res = coll.query(
-                query_texts=["Extract company details and all office locations."],
-                n_results=4
+                query_texts=["company name, about us, services, contact information, email, phone, office address, location"],
+                n_results=6
             )
             # attempt to get returned documents safely
             docs_list = res.get("documents", [])
@@ -263,33 +286,71 @@ def rag_extract(chunks, site_url):
                 # docs_list is list of lists (one per query). join first set.
                 context = " ".join(docs_list[0]) if docs_list[0] else ""
             else:
-                context = " ".join(chunks[:4])
+                context = " ".join(chunks[:6])
         except Exception as e:
             print("⚠️ Chroma operation failed, falling back. Error:", str(e))
-            context = " ".join(chunks[:4])
+            context = " ".join(chunks[:6])
     else:
         # simple fallback context if Chromadb not available
-        context = " ".join(chunks[:4])
+        context = " ".join(chunks[:6])
 
     prompt = f"""
-You are a world-class business data extractor.
+You are a world-class business data extractor. Your job is to extract accurate business information from website content.
 
-Extract ALL fields with multiple values where available:
-- Business Name
-- About Us
-- Main Services (LIST)
-- Email (LIST)
-- Phone (LIST)
-- Address (LIST)
-- Facebook
-- Instagram
-- LinkedIn
-- Twitter / X
-- Description
-- URL: {site_url}
+Extract the following fields:
 
-Return clean JSON ONLY.
-Use ONLY the following text:
+1. **Business Name**: The official company/business name
+
+2. **About Us**: A brief description of the company (2-3 sentences)
+
+3. **Main Services**: List of services offered (as array)
+
+4. **Email**: All business email addresses (as array)
+
+5. **Phone**: All business phone numbers (as array)
+
+6. **Address**: ONLY complete physical office/business addresses (as array)
+   - MUST include: Street number, street/building name, area/locality, city, state/region
+   - MUST contain address keywords like: Street, Road, Complex, Building, Mall, Highway, Avenue, Lane, Square, Nagar, Society, Floor, Suite, Office
+   - DO NOT include:
+     * Business hours (e.g., "10:00 AM - 7:00 PM", "Monday - Saturday")
+     * Timestamps or dates (e.g., "2017", "2025", "15-January-2017")
+     * Review counts (e.g., "267 reviews", "4.7 rating")
+     * Social media text (e.g., "Follow Us", "Google Reviews")
+     * Phone numbers appearing alone
+     * Promotional text or website content
+     * Incomplete fragments
+   
+   EXAMPLES OF VALID ADDRESSES:
+   ✓ "306, Surmount Complex, Opposite Iscon Mega Mall, Sarkhej-Gandhinagar Highway, Near Baleshwar Square, Ahmedabad, Gujarat 380054"
+   ✓ "1234 Main Street, Suite 500, Downtown, New York, NY 10001"
+   
+   EXAMPLES OF INVALID (DO NOT EXTRACT):
+   ✗ "10:00 AM - 7:00 PM Monday - Saturday"
+   ✗ "267 reviews Google Reviews"
+   ✗ "+91 76002 16429"
+   ✗ "Follow Us ARE InfoTech"
+   ✗ "2017 Category Skin Care Clinical"
+
+7. **Facebook**: Facebook page URL (if found)
+
+8. **Instagram**: Instagram profile URL (if found)
+
+9. **LinkedIn**: LinkedIn company page URL (if found)
+
+10. **Twitter / X**: Twitter/X profile URL (if found)
+
+11. **Description**: A comprehensive 2-3 sentence description of what the business does
+
+12. **URL**: {site_url}
+
+IMPORTANT RULES:
+- Return ONLY valid, complete information
+- For addresses, be VERY strict - only extract if it's a complete physical location
+- If a field has no valid data, return empty array [] or empty string ""
+- Return clean, properly formatted JSON ONLY (no markdown, no code blocks)
+
+Website content to extract from:
 
 {context}
 """
