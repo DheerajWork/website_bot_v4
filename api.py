@@ -1,24 +1,12 @@
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
-
-import importlib
-import website_bot
-importlib.reload(website_bot)
-
-from website_bot import (
-    get_site_urls,
-    select_main_pages,
-    fetch_page,
-    clean_text,
-    chunk_text,
-    rag_extract,
-    extract_all_emails,
-    extract_all_phones,
-    extract_all_addresses,
-    extract_social_links_from_html
-)
 from bs4 import BeautifulSoup
 import json
+import importlib
+import website_bot
+
+# Reload website_bot to ensure latest changes load on restart
+importlib.reload(website_bot)
 
 app = FastAPI(title="Website Info Extractor API")
 
@@ -48,8 +36,8 @@ def scrape(request: URLRequest):
 
     try:
         print(f"🔍 Fetching URLs for: {site_url}")
-        all_urls = get_site_urls(site_url)
-        main_pages = select_main_pages(all_urls, site_url)
+        all_urls = website_bot.get_site_urls(site_url)
+        main_pages = website_bot.select_main_pages(all_urls, site_url)
 
         all_text = ""
         all_social = {
@@ -61,10 +49,10 @@ def scrape(request: URLRequest):
 
         # ---------------- Scrape each main page ----------------
         for page in main_pages:
-            html = fetch_page(page)
+            html = website_bot.fetch_page(page)
 
             # Extract social media links
-            page_social = extract_social_links_from_html(html)
+            page_social = website_bot.extract_social_links_from_html(html)
             for k, v in page_social.items():
                 if v and not all_social[k]:
                     all_social[k] = v
@@ -72,26 +60,26 @@ def scrape(request: URLRequest):
             # Clean and extract text
             soup = BeautifulSoup(html, "html.parser")
             [s.extract() for s in soup(["script", "style", "noscript"])]
-            all_text += " " + clean_text(soup.get_text(" ", strip=True))
+            all_text += " " + website_bot.clean_text(soup.get_text(" ", strip=True))
 
         # Clean combined text
-        all_text = clean_text(all_text)
+        all_text = website_bot.clean_text(all_text)
 
         # Chunk text for RAG processing
-        chunks = chunk_text(all_text)
+        chunks = website_bot.chunk_text(all_text)
 
         # ---------------- Run RAG extraction ----------------
-        data = rag_extract(chunks, site_url)
+        data = website_bot.rag_extract(chunks, site_url)
 
         # Fallback extraction (MULTIPLE emails/phones/addresses)
         if not data.get("Email"):
-            data["Email"] = extract_all_emails(all_text)
+            data["Email"] = website_bot.extract_all_emails(all_text)
 
         if not data.get("Phone"):
-            data["Phone"] = extract_all_phones(all_text)
+            data["Phone"] = website_bot.extract_all_phones(all_text)
 
         if not data.get("Address"):
-            data["Address"] = extract_all_addresses(all_text)
+            data["Address"] = website_bot.extract_all_addresses(all_text)
 
         # Merge social media links
         for k, v in all_social.items():
