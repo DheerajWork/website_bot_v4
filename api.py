@@ -1,5 +1,10 @@
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
+
+import importlib
+import website_bot
+importlib.reload(website_bot)
+
 from website_bot import (
     get_site_urls,
     select_main_pages,
