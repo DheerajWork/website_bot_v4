@@ -259,7 +259,11 @@ def rag_extract(chunks, site_url):
             #     name=cname,
             #     embedding_function=openai_ef
             # )
-            coll = chroma_client.get_or_create_collection(name=cname)
+            coll = chroma_client.get_or_create_collection(
+                name=cname,
+                embedding_function=openai_ef,
+                metadata={"dimension": 3072}
+            )
             def get_embeddings(texts):
                 # Ensure it's always a list of strings
                 if isinstance(texts, str):
