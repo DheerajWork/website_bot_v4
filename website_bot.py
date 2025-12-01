@@ -29,29 +29,22 @@ if not FIRECRAWL_KEY:
 
 # ---------------- ChromaDB & OpenAI ----------------
 try:
-    from chromadb import Client as ChromaClient
+    from chromadb import PersistentClient
     from chromadb.utils import embedding_functions
     from openai import OpenAI
 except Exception as e:
     print("Import error:", e)
     raise SystemExit(f"Error importing modules: {e}")
 
-# Try to create a Chroma client using the current (non-deprecated) API.
-# If it fails (old config / migration required), we keep chroma_client = None
-# so the rest of the script can still run (with a fallback).
-chroma_client = None
+# Initialize NEW persistent Chroma client
 try:
-    chroma_client = ChromaClient()
-    # create a default collection placeholder (will be created per-site later)
-    # This is optional; we create collections dynamically in rag_extract.
-    # chroma_client.get_or_create_collection(name="web_chunks")
-    print("✅ Chroma client initialized.")
+    chroma_client = PersistentClient(path="./chroma")
+    print("✅ Chroma client initialized at ./chroma")
 except Exception as err:
-    # Keep the client None — script will still run using a quick fallback.
-    print("⚠️ Could not initialize Chroma client (deprecated/config error or missing migration).")
+    print("⚠️ Could not initialize Chroma client.")
     print("Chroma error:", str(err))
-    print("If you have data to migrate run: pip install chroma-migrate && chroma-migrate")
-    print("Or update your chromadb usage to the new client API. Continuing without persistent Chroma.")
+    chroma_client = None
+
 
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
@@ -262,20 +255,55 @@ def rag_extract(chunks, site_url):
     if chroma_client:
         try:
             cname = sanitize_collection_name(site_url)
-            coll = chroma_client.get_or_create_collection(
-                name=cname,
-                embedding_function=openai_ef
-            )
+            # coll = chroma_client.get_or_create_collection(
+            #     name=cname,
+            #     embedding_function=openai_ef
+            # )
+            coll = chroma_client.get_or_create_collection(name=cname)
+            def get_embeddings(texts):
+                # Ensure it's always a list of strings
+                if isinstance(texts, str):
+                    texts = [texts]
+                if not isinstance(texts, list):
+                    texts = [str(texts)]
 
+                clean_texts = [str(t)[:8000] for t in texts]   # trim to 8k chars (OpenAI limit)
+
+                try:
+                    resp = openai_client.embeddings.create(
+                        model="text-embedding-3-large",
+                        input=clean_texts
+                    )
+                    return [item.embedding for item in resp.data]
+                except Exception as e:
+                    print("❌ Embedding ERROR:", e)
+                    print("⚠ Texts passed to embed:", clean_texts[:3])
+                    raise
+
+
+            print(f"✅ Using Chroma collection: {cname}")
             # add chunks (upsert)
-            for i, ch in enumerate(chunks):
+            BATCH = 8
+
+            # Clean chunks
+            chunks = [str(c).strip() for c in chunks if str(c).strip()]
+
+            for b in range(0, len(chunks), BATCH):
+                batch = chunks[b:b+BATCH]
+
+                # Get embeddings using your new function
+                emb = get_embeddings(batch)
+
+                ids = [f"{site_url}_{b+i}" for i in range(len(batch))]
+                metas = [{"chunk": b+i} for i in range(len(batch))]
+
                 coll.add(
-                    documents=[ch],
-                    metadatas=[{"chunk": i}],
-                    ids=[f"{site_url}_{i}"]
+                    documents=batch,
+                    metadatas=metas,
+                    ids=ids,
+                    embeddings=emb 
                 )
 
-            # query - get more results and specifically look for contact/address info
             res = coll.query(
                 query_texts=["company name, about us, services, contact information, email, phone, office address, location"],
                 n_results=6

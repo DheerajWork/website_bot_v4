@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
-import json
 import importlib
 import website_bot
 
@@ -79,7 +78,10 @@ def scrape(request: URLRequest):
             data["Phone"] = website_bot.extract_all_phones(all_text)
 
         if not data.get("Address"):
+            print("⚠️ RAG returned no address → fallback extractor running")
             data["Address"] = website_bot.extract_all_addresses(all_text)
+        else:
+            print("✅ Address found via RAG → fallback not used")
 
         # Merge social media links
         for k, v in all_social.items():
