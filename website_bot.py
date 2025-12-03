@@ -460,3 +460,26 @@ if __name__ == "__main__":
 
     print("\n\n✅ Final Extracted Data:")
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+
+def extract_logo_url(html, base_url):
+    """Find logo URL from common locations."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1️⃣ Look for <img> with logo keywords
+    logo_keywords = ["logo", "brand", "site-logo", "header-logo"]
+    for img in soup.find_all("img", src=True):
+        src = img["src"].lower()
+        alt = (img.get("alt") or "").lower()
+
+        if any(key in src for key in logo_keywords) or any(key in alt for key in logo_keywords):
+            return urllib.parse.urljoin(base_url, img["src"])
+
+    # 2️⃣ Look inside <link rel="icon">, <link rel="shortcut icon">
+    for link in soup.find_all("link", href=True):
+        rel = (link.get("rel") or [""])[0]
+        if "icon" in rel or "shortcut icon" in rel or "apple-touch-icon" in rel:
+            return urllib.parse.urljoin(base_url, link["href"])
+
+    return ""
