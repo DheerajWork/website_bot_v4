@@ -25,11 +25,13 @@ def scrape(request: URLRequest):
         main_pages = website_bot.select_main_pages(all_urls, site_url)
 
         all_text = ""
+        all_html = ""
         all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
         logo_url_found = None
 
         for page in main_pages:
             html = website_bot.fetch_page(page)
+            all_html += " " + (html or "")
 
             if not logo_url_found:
                 logo = website_bot.extract_logo_url(html, page)
@@ -51,8 +53,17 @@ def scrape(request: URLRequest):
 
         data["Logo"] = logo_url_found or ""
 
-        if not data.get("Email"):
-            data["Email"] = website_bot.extract_all_emails(all_text)
+        # Extract emails with Cloudflare protection handling
+        extracted_emails = website_bot.extract_all_emails(all_text, all_html)
+        
+        if not data.get("Email") or not website_bot.clean_email_list(data.get("Email", [])):
+            data["Email"] = extracted_emails
+        else:
+            existing = data.get("Email", [])
+            if isinstance(existing, str):
+                existing = [existing]
+            all_emails = list(set(existing + extracted_emails))
+            data["Email"] = website_bot.clean_email_list(all_emails)
 
         if not data.get("Phone"):
             data["Phone"] = website_bot.extract_all_phones(all_text)
@@ -64,6 +75,7 @@ def scrape(request: URLRequest):
             if v:
                 data[k] = v
 
+        # Set defaults with proper empty values
         defaults = {
             "Business Name": "",
             "About Us": "",
@@ -79,9 +91,15 @@ def scrape(request: URLRequest):
             "Logo": "",
             "URL": site_url
         }
+        
         for k, v in defaults.items():
-            if k not in data or not data[k]:
+            if k not in data:
                 data[k] = v
+            elif k == "Email":
+                # Final cleanup for emails
+                data[k] = website_bot.clean_email_list(data[k] if isinstance(data[k], list) else [])
+                if not data[k]:
+                    data[k] = []
 
         return {"success": True, "message": "Scraping Successful", "data": data}
 

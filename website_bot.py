@@ -2,6 +2,7 @@
 """
 SUPER OPTIMIZED WEBSITE BOT — FINAL VERSION
 Best multi-office extraction, perfect contacts, with improved LLM accuracy
+Includes: Cloudflare email protection decoder
 """
 
 import os
@@ -45,7 +46,6 @@ except Exception as err:
     print("Chroma error:", str(err))
     chroma_client = None
 
-
 openai_client = OpenAI(api_key=OPENAI_KEY)
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_KEY,
@@ -64,8 +64,9 @@ def fetch_page(url: str) -> str:
     """
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         }
         r = requests.get(url, headers=headers, timeout=20)
         if r.status_code == 200 and len(r.text) > 200:
@@ -88,6 +89,163 @@ def fetch_page(url: str) -> str:
 
     return ""
 
+# ---------------- Cloudflare Email Protection Decoder ----------------
+def decode_cloudflare_email(encoded_string: str) -> str:
+    """
+    Decode Cloudflare protected email addresses.
+    Cloudflare encodes emails using XOR cipher with first 2 hex chars as key.
+    """
+    try:
+        if not encoded_string:
+            return ""
+        
+        # Remove any non-hex characters
+        encoded_string = re.sub(r'[^a-fA-F0-9]', '', encoded_string)
+        
+        if len(encoded_string) < 4:
+            return ""
+            
+        r = int(encoded_string[:2], 16)
+        email = ''.join([
+            chr(int(encoded_string[i:i+2], 16) ^ r) 
+            for i in range(2, len(encoded_string), 2)
+        ])
+        return email
+    except Exception as e:
+        return ""
+
+def extract_cloudflare_emails(html: str) -> list:
+    """Extract emails protected by Cloudflare's email protection."""
+    emails = []
+    
+    if not html:
+        return emails
+        
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Method 1: Look for Cloudflare protected email spans
+    for span in soup.find_all("span", class_="__cf_email__"):
+        encoded = span.get("data-cfemail")
+        if encoded:
+            decoded = decode_cloudflare_email(encoded)
+            if decoded and "@" in decoded and is_valid_email(decoded):
+                emails.append(decoded)
+    
+    # Method 2: Look for <a> tags with data-cfemail attribute
+    for a in soup.find_all("a", attrs={"data-cfemail": True}):
+        encoded = a.get("data-cfemail")
+        if encoded:
+            decoded = decode_cloudflare_email(encoded)
+            if decoded and "@" in decoded and is_valid_email(decoded):
+                emails.append(decoded)
+    
+    # Method 3: Look for href="/cdn-cgi/l/email-protection#..."
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        if "/cdn-cgi/l/email-protection#" in href:
+            encoded = href.split("#")[-1]
+            decoded = decode_cloudflare_email(encoded)
+            if decoded and "@" in decoded and is_valid_email(decoded):
+                emails.append(decoded)
+        elif "/cdn-cgi/l/email-protection" in href:
+            # Sometimes it's in query params
+            match = re.search(r'email-protection[#?]([a-fA-F0-9]+)', href)
+            if match:
+                decoded = decode_cloudflare_email(match.group(1))
+                if decoded and "@" in decoded and is_valid_email(decoded):
+                    emails.append(decoded)
+    
+    # Method 4: Look in script tags for encoded patterns
+    for script in soup.find_all("script"):
+        script_text = script.get_text()
+        # Find patterns like data-cfemail="..." in inline scripts
+        cf_matches = re.findall(r'data-cfemail=["\']([a-fA-F0-9]+)["\']', script_text)
+        for match in cf_matches:
+            decoded = decode_cloudflare_email(match)
+            if decoded and "@" in decoded and is_valid_email(decoded):
+                emails.append(decoded)
+    
+    return list(set(emails))
+
+def is_valid_email(email: str) -> bool:
+    """Check if email is valid and not a protected placeholder."""
+    if not email:
+        return False
+    
+    email_lower = email.lower().strip()
+    
+    # Filter out protected/placeholder/invalid emails
+    invalid_patterns = [
+        "[email protected]",
+        "[email\xa0protected]",
+        "[email protected]",
+        "email protected",
+        "protected",
+        "emailprotected",
+        "example.com",
+        "example@",
+        "@example",
+        "test@test",
+        "your@email",
+        "youremail@",
+        "info@your",
+        "your@domain",
+        "email@email",
+        "name@domain",
+        "user@domain",
+        "sample@",
+        "@sample",
+        "dummy@",
+        "fake@",
+        "placeholder",
+        "xxxxx",
+        "yyyyy",
+        "zzzzz",
+    ]
+    
+    for pattern in invalid_patterns:
+        if pattern in email_lower:
+            return False
+    
+    # Check for "[email" pattern (common protected indicator)
+    if "[email" in email_lower or "email]" in email_lower:
+        return False
+    
+    # Check for excessive special characters
+    if email.count('@') != 1:
+        return False
+    
+    # Basic email validation regex
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, email):
+        return False
+    
+    # Check domain part has at least one dot
+    domain = email.split('@')[1]
+    if '.' not in domain:
+        return False
+    
+    # Check TLD is reasonable length
+    tld = domain.split('.')[-1]
+    if len(tld) < 2 or len(tld) > 10:
+        return False
+    
+    return True
+
+def clean_email_list(emails: list) -> list:
+    """Clean and validate a list of emails, removing invalid ones."""
+    if not emails:
+        return []
+    
+    cleaned = []
+    for email in emails:
+        if isinstance(email, str):
+            email = email.strip()
+            if is_valid_email(email):
+                cleaned.append(email)
+    
+    return list(set(cleaned))
+
 # ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
     soup = BeautifulSoup(html or "", "html.parser")
@@ -107,11 +265,59 @@ def extract_social_links_from_html(html):
     return social
 
 # ---------------- Contact Extraction (Multi) ----------------
-def extract_all_emails(text):
-    return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text or "")))
+def extract_all_emails(text: str, html: str = None) -> list:
+    """
+    Extract all valid emails from text and HTML.
+    Handles Cloudflare protection and filters invalid emails.
+    """
+    emails = []
+    
+    # Standard regex extraction from text
+    if text:
+        found = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
+        emails.extend(found)
+    
+    # Extract Cloudflare protected emails from HTML
+    if html:
+        cf_emails = extract_cloudflare_emails(html)
+        emails.extend(cf_emails)
+        
+        # Also try standard regex on HTML (might catch some in attributes)
+        html_emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html)
+        emails.extend(html_emails)
+    
+    # Clean and validate
+    valid_emails = clean_email_list(emails)
+    
+    return valid_emails if valid_emails else []
 
 def extract_all_phones(text):
-    return list(set(re.findall(r"\+?\d[\d\-\s()]{8,15}", text or "")))
+    if not text:
+        return []
+    
+    phones = []
+    # Multiple patterns for different phone formats
+    patterns = [
+        r'\+?\d{1,4}[-.\s]?$?\d{1,4}$?[-.\s]?\d{1,4}[-.\s]?\d{1,9}',
+        r'\+?\d[\d\-\s()]{8,15}',
+        r'$\d{3}$\s*\d{3}[-.\s]?\d{4}',
+        r'\d{3}[-.\s]\d{3}[-.\s]\d{4}',
+    ]
+    
+    for pattern in patterns:
+        found = re.findall(pattern, text)
+        phones.extend(found)
+    
+    # Clean and deduplicate
+    cleaned_phones = []
+    for phone in phones:
+        phone = phone.strip()
+        # Must have at least 10 digits
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) >= 10 and len(digits) <= 15:
+            cleaned_phones.append(phone)
+    
+    return list(set(cleaned_phones))
 
 def extract_all_addresses(text):
     """
@@ -255,23 +461,19 @@ def rag_extract(chunks, site_url):
     if chroma_client:
         try:
             cname = sanitize_collection_name(site_url)
-            # coll = chroma_client.get_or_create_collection(
-            #     name=cname,
-            #     embedding_function=openai_ef
-            # )
             coll = chroma_client.get_or_create_collection(
                 name=cname,
                 embedding_function=openai_ef,
                 metadata={"dimension": 3072}
             )
+            
             def get_embeddings(texts):
-                # Ensure it's always a list of strings
                 if isinstance(texts, str):
                     texts = [texts]
                 if not isinstance(texts, list):
                     texts = [str(texts)]
 
-                clean_texts = [str(t)[:8000] for t in texts]   # trim to 8k chars (OpenAI limit)
+                clean_texts = [str(t)[:8000] for t in texts]
 
                 try:
                     resp = openai_client.embeddings.create(
@@ -281,23 +483,16 @@ def rag_extract(chunks, site_url):
                     return [item.embedding for item in resp.data]
                 except Exception as e:
                     print("❌ Embedding ERROR:", e)
-                    print("⚠ Texts passed to embed:", clean_texts[:3])
                     raise
 
-
             print(f"✅ Using Chroma collection: {cname}")
-            # add chunks (upsert)
             BATCH = 8
 
-            # Clean chunks
             chunks = [str(c).strip() for c in chunks if str(c).strip()]
 
             for b in range(0, len(chunks), BATCH):
                 batch = chunks[b:b+BATCH]
-
-                # Get embeddings using your new function
                 emb = get_embeddings(batch)
-
                 ids = [f"{site_url}_{b+i}" for i in range(len(batch))]
                 metas = [{"chunk": b+i} for i in range(len(batch))]
 
@@ -312,10 +507,8 @@ def rag_extract(chunks, site_url):
                 query_texts=["company name, about us, services, contact information, email, phone, office address, location"],
                 n_results=6
             )
-            # attempt to get returned documents safely
             docs_list = res.get("documents", [])
             if docs_list and isinstance(docs_list, list):
-                # docs_list is list of lists (one per query). join first set.
                 context = " ".join(docs_list[0]) if docs_list[0] else ""
             else:
                 context = " ".join(chunks[:6])
@@ -323,7 +516,6 @@ def rag_extract(chunks, site_url):
             print("⚠️ Chroma operation failed, falling back. Error:", str(e))
             context = " ".join(chunks[:6])
     else:
-        # simple fallback context if Chromadb not available
         context = " ".join(chunks[:6])
 
     prompt = f"""
@@ -338,6 +530,9 @@ Extract the following fields:
 3. **Main Services**: List of services offered (as array)
 
 4. **Email**: All business email addresses (as array)
+   - ONLY include valid email addresses in format: name@domain.com
+   - DO NOT include "[email protected]" or "[email protected]" - these are PROTECTED/INVALID
+   - If you cannot find a valid email, return empty array []
 
 5. **Phone**: All business phone numbers (as array)
 
@@ -352,17 +547,6 @@ Extract the following fields:
      * Phone numbers appearing alone
      * Promotional text or website content
      * Incomplete fragments
-   
-   EXAMPLES OF VALID ADDRESSES:
-   ✓ "306, Surmount Complex, Opposite Iscon Mega Mall, Sarkhej-Gandhinagar Highway, Near Baleshwar Square, Ahmedabad, Gujarat 380054"
-   ✓ "1234 Main Street, Suite 500, Downtown, New York, NY 10001"
-   
-   EXAMPLES OF INVALID (DO NOT EXTRACT):
-   ✗ "10:00 AM - 7:00 PM Monday - Saturday"
-   ✗ "267 reviews Google Reviews"
-   ✗ "+91 76002 16429"
-   ✗ "Follow Us ARE InfoTech"
-   ✗ "2017 Category Skin Care Clinical"
 
 7. **Facebook**: Facebook page URL (if found)
 
@@ -378,6 +562,7 @@ Extract the following fields:
 
 IMPORTANT RULES:
 - Return ONLY valid, complete information
+- For emails: NEVER return "[email protected]" or protected emails - return [] instead
 - For addresses, be VERY strict - only extract if it's a complete physical location
 - If a field has no valid data, return empty array [] or empty string ""
 - Return clean, properly formatted JSON ONLY (no markdown, no code blocks)
@@ -387,7 +572,6 @@ Website content to extract from:
 {context}
 """
 
-    # call OpenAI to extract structured JSON
     r = openai_client.chat.completions.create(
         model="gpt-4.1",
         messages=[{"role":"user","content":prompt}],
@@ -398,9 +582,35 @@ Website content to extract from:
     out = re.sub(r"```json|```", "", out)
 
     try:
-        return json.loads(out)
+        data = json.loads(out)
+        
+        # Post-process to clean emails
+        if "Email" in data:
+            data["Email"] = clean_email_list(data["Email"] if isinstance(data["Email"], list) else [data["Email"]])
+        
+        return data
     except:
         return {"raw": out}
+
+# ---------------- Logo Extraction ----------------
+def extract_logo_url(html, base_url):
+    """Find logo URL from common locations."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    logo_keywords = ["logo", "brand", "site-logo", "header-logo"]
+    for img in soup.find_all("img", src=True):
+        src = img["src"].lower()
+        alt = (img.get("alt") or "").lower()
+
+        if any(key in src for key in logo_keywords) or any(key in alt for key in logo_keywords):
+            return urllib.parse.urljoin(base_url, img["src"])
+
+    for link in soup.find_all("link", href=True):
+        rel = (link.get("rel") or [""])[0]
+        if "icon" in rel or "shortcut icon" in rel or "apple-touch-icon" in rel:
+            return urllib.parse.urljoin(base_url, link["href"])
+
+    return ""
 
 # ---------------- Main Flow ----------------
 if __name__ == "__main__":
@@ -417,6 +627,7 @@ if __name__ == "__main__":
         print(" →", p)
 
     all_text = ""
+    all_html = ""
     all_social = {"Facebook": "", "Instagram": "", "LinkedIn": "", "Twitter / X": ""}
 
     # ---------------- Parallel Scrape ----------------
@@ -426,19 +637,19 @@ if __name__ == "__main__":
         soup = BeautifulSoup(html or "", "html.parser")
         [s.extract() for s in soup(["script", "style", "noscript"])]
         text = clean_text(soup.get_text(" ", strip=True))
-        return text, social
+        return text, social, html
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as exe:
         results = list(exe.map(scrape_single_page, main_pages))
 
-    for text, social in results:
+    for text, social, html in results:
         all_text += " " + (text or "")
+        all_html += " " + (html or "")
         for k, v in social.items():
             if v and not all_social[k]:
                 all_social[k] = v
 
     all_text = clean_text(all_text)
-    # Prevent hallucination by removing duplicates
     all_text = " ".join(dict.fromkeys(all_text.split()))
 
     chunks = chunk_text(all_text)
@@ -446,8 +657,18 @@ if __name__ == "__main__":
     print("\n🧠 Running RAG…")
     data = rag_extract(chunks, site_url)
 
-    # fallback extraction — MULTIPLE
-    data["Email"] = data.get("Email") or extract_all_emails(all_text)
+    # fallback extraction — MULTIPLE (now with HTML for Cloudflare decoding)
+    extracted_emails = extract_all_emails(all_text, all_html)
+    if not data.get("Email") or not clean_email_list(data.get("Email", [])):
+        data["Email"] = extracted_emails
+    else:
+        # Merge and clean
+        existing = data.get("Email", [])
+        if isinstance(existing, str):
+            existing = [existing]
+        all_emails = list(set(existing + extracted_emails))
+        data["Email"] = clean_email_list(all_emails)
+    
     data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
     data["Address"] = data.get("Address") or extract_all_addresses(all_text)
 
@@ -458,28 +679,9 @@ if __name__ == "__main__":
 
     data["URL"] = site_url
 
+    # Final cleanup - ensure no protected emails slip through
+    if "Email" in data:
+        data["Email"] = clean_email_list(data["Email"] if isinstance(data["Email"], list) else [])
+
     print("\n\n✅ Final Extracted Data:")
     print(json.dumps(data, indent=2, ensure_ascii=False))
-
-
-
-def extract_logo_url(html, base_url):
-    """Find logo URL from common locations."""
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 1️⃣ Look for <img> with logo keywords
-    logo_keywords = ["logo", "brand", "site-logo", "header-logo"]
-    for img in soup.find_all("img", src=True):
-        src = img["src"].lower()
-        alt = (img.get("alt") or "").lower()
-
-        if any(key in src for key in logo_keywords) or any(key in alt for key in logo_keywords):
-            return urllib.parse.urljoin(base_url, img["src"])
-
-    # 2️⃣ Look inside <link rel="icon">, <link rel="shortcut icon">
-    for link in soup.find_all("link", href=True):
-        rel = (link.get("rel") or [""])[0]
-        if "icon" in rel or "shortcut icon" in rel or "apple-touch-icon" in rel:
-            return urllib.parse.urljoin(base_url, link["href"])
-
-    return ""
