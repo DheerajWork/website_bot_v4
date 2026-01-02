@@ -4,13 +4,16 @@ from bs4 import BeautifulSoup
 import importlib
 import website_bot
 
+# Reload to get latest changes
 importlib.reload(website_bot)
 
 app = FastAPI(title="Website Info Extractor API")
 router = APIRouter(prefix="/api")
 
+
 class URLRequest(BaseModel):
     url: str
+
 
 @router.post("/scrape")
 def scrape(request: URLRequest):
@@ -43,7 +46,7 @@ def scrape(request: URLRequest):
                 if v and not all_social[k]:
                     all_social[k] = v
 
-            soup = BeautifulSoup(html, "html.parser")
+            soup = BeautifulSoup(html or "", "html.parser")
             [s.extract() for s in soup(["script", "style", "noscript"])]
             all_text += " " + website_bot.clean_text(soup.get_text(" ", strip=True))
 
@@ -53,24 +56,31 @@ def scrape(request: URLRequest):
 
         data["Logo"] = logo_url_found or ""
 
-        # Extract emails with Cloudflare protection handling
+        # Extract and clean emails with deduplication
         extracted_emails = website_bot.extract_all_emails(all_text, all_html)
-        
-        if not data.get("Email") or not website_bot.clean_email_list(data.get("Email", [])):
-            data["Email"] = extracted_emails
-        else:
-            existing = data.get("Email", [])
-            if isinstance(existing, str):
-                existing = [existing]
-            all_emails = list(set(existing + extracted_emails))
-            data["Email"] = website_bot.clean_email_list(all_emails)
+        existing_emails = data.get("Email", [])
+        if isinstance(existing_emails, str):
+            existing_emails = [existing_emails] if existing_emails else []
+        all_emails = existing_emails + extracted_emails
+        data["Email"] = website_bot.clean_email_list(all_emails)
 
-        if not data.get("Phone"):
-            data["Phone"] = website_bot.extract_all_phones(all_text)
+        # Extract and clean phones with deduplication
+        extracted_phones = website_bot.extract_all_phones(all_text)
+        existing_phones = data.get("Phone", [])
+        if isinstance(existing_phones, str):
+            existing_phones = [existing_phones] if existing_phones else []
+        all_phones = existing_phones + extracted_phones
+        data["Phone"] = website_bot.clean_phone_list(all_phones)
 
-        if not data.get("Address"):
-            data["Address"] = website_bot.extract_all_addresses(all_text)
+        # Extract and clean addresses with deduplication
+        extracted_addresses = website_bot.extract_all_addresses(all_text)
+        existing_addresses = data.get("Address", [])
+        if isinstance(existing_addresses, str):
+            existing_addresses = [existing_addresses] if existing_addresses else []
+        all_addresses = existing_addresses + extracted_addresses
+        data["Address"] = website_bot.clean_address_list(all_addresses)
 
+        # Add social links
         for k, v in all_social.items():
             if v:
                 data[k] = v
@@ -95,15 +105,30 @@ def scrape(request: URLRequest):
         for k, v in defaults.items():
             if k not in data:
                 data[k] = v
-            elif k == "Email":
-                # Final cleanup for emails
-                data[k] = website_bot.clean_email_list(data[k] if isinstance(data[k], list) else [])
-                if not data[k]:
-                    data[k] = []
+            elif data[k] is None:
+                data[k] = v
+            elif k in ["Email", "Phone", "Address", "Main Services"]:
+                # Ensure these are always lists
+                if not isinstance(data[k], list):
+                    data[k] = [data[k]] if data[k] else []
 
         return {"success": True, "message": "Scraping Successful", "data": data}
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error scraping site: {str(e)}")
 
+
+@router.get("/health")
+def health_check():
+    return {"status": "healthy", "message": "API is running"}
+
+
 app.include_router(router)
+
+
+# Run with: uvicorn api:app --reload --host 0.0.0.0 --port 8000
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

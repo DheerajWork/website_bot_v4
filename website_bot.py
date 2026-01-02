@@ -2,7 +2,7 @@
 """
 SUPER OPTIMIZED WEBSITE BOT — FINAL VERSION
 Best multi-office extraction, perfect contacts, with improved LLM accuracy
-Includes: Cloudflare email protection decoder
+Includes: Cloudflare email protection decoder, duplicate removal
 """
 
 import os
@@ -52,42 +52,11 @@ openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     model_name="text-embedding-3-large"
 )
 
+
 # ---------------- Helper Functions ----------------
 def clean_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
-# Fast Requests + Firecrawl Fetch
-def fetch_page(url: str) -> str:
-    """
-    First try Requests.
-    If blocked, try Firecrawl HTML extraction (if API key exists).
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        }
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code == 200 and len(r.text) > 200:
-            return r.text
-    except:
-        pass
-
-    # Firecrawl fallback
-    if FIRECRAWL_KEY:
-        try:
-            fc_url = "https://api.firecrawl.dev/v2/scrape"
-            headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
-            payload = {"url": url, "formats": ["html"]}
-
-            fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
-            html = fc.json().get("html", "")
-            return html
-        except:
-            pass
-
-    return ""
 
 # ---------------- Cloudflare Email Protection Decoder ----------------
 def decode_cloudflare_email(encoded_string: str) -> str:
@@ -113,6 +82,7 @@ def decode_cloudflare_email(encoded_string: str) -> str:
         return email
     except Exception as e:
         return ""
+
 
 def extract_cloudflare_emails(html: str) -> list:
     """Extract emails protected by Cloudflare's email protection."""
@@ -167,6 +137,7 @@ def extract_cloudflare_emails(html: str) -> list:
     
     return list(set(emails))
 
+
 def is_valid_email(email: str) -> bool:
     """Check if email is valid and not a protected placeholder."""
     if not email:
@@ -201,6 +172,8 @@ def is_valid_email(email: str) -> bool:
         "xxxxx",
         "yyyyy",
         "zzzzz",
+        "noreply",
+        "no-reply",
     ]
     
     for pattern in invalid_patterns:
@@ -232,19 +205,106 @@ def is_valid_email(email: str) -> bool:
     
     return True
 
+
 def clean_email_list(emails: list) -> list:
-    """Clean and validate a list of emails, removing invalid ones."""
+    """Clean and validate a list of emails, removing invalid and duplicate ones (case-insensitive)."""
     if not emails:
         return []
     
     cleaned = []
+    seen_lower = set()  # Track lowercase versions to avoid duplicates
+    
     for email in emails:
         if isinstance(email, str):
             email = email.strip()
+            email_lower = email.lower()
+            
+            # Skip if we've already seen this email (case-insensitive)
+            if email_lower in seen_lower:
+                continue
+                
             if is_valid_email(email):
-                cleaned.append(email)
+                cleaned.append(email_lower)  # Store lowercase version
+                seen_lower.add(email_lower)
     
-    return list(set(cleaned))
+    return cleaned
+
+
+def clean_phone_list(phones: list) -> list:
+    """Clean and deduplicate phone numbers."""
+    if not phones:
+        return []
+    
+    cleaned = []
+    seen_digits = set()
+    
+    for phone in phones:
+        if isinstance(phone, str):
+            phone = phone.strip()
+            digits = re.sub(r'\D', '', phone)
+            
+            if len(digits) >= 10 and len(digits) <= 15 and digits not in seen_digits:
+                cleaned.append(phone)
+                seen_digits.add(digits)
+    
+    return cleaned
+
+
+def clean_address_list(addresses: list) -> list:
+    """Clean and deduplicate addresses (case-insensitive, normalized)."""
+    if not addresses:
+        return []
+    
+    cleaned = []
+    seen_normalized = set()
+    
+    for addr in addresses:
+        if isinstance(addr, str):
+            addr = addr.strip()
+            # Normalize: lowercase, remove extra spaces, remove punctuation for comparison
+            normalized = re.sub(r'[^\w\s]', '', addr.lower())
+            normalized = re.sub(r'\s+', ' ', normalized).strip()
+            
+            if normalized and normalized not in seen_normalized:
+                cleaned.append(addr)
+                seen_normalized.add(normalized)
+    
+    return cleaned
+
+
+# ---------------- Fast Requests + Firecrawl Fetch ----------------
+def fetch_page(url: str) -> str:
+    """
+    First try Requests.
+    If blocked, try Firecrawl HTML extraction (if API key exists).
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        }
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200 and len(r.text) > 200:
+            return r.text
+    except:
+        pass
+
+    # Firecrawl fallback
+    if FIRECRAWL_KEY:
+        try:
+            fc_url = "https://api.firecrawl.dev/v2/scrape"
+            headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
+            payload = {"url": url, "formats": ["html"]}
+
+            fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
+            html = fc.json().get("html", "")
+            return html
+        except:
+            pass
+
+    return ""
+
 
 # ---------------- Social Links Extraction ----------------
 def extract_social_links_from_html(html):
@@ -254,15 +314,16 @@ def extract_social_links_from_html(html):
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
         if "facebook.com" in href and not social["Facebook"]:
-            social["Facebook"] = href
+            social["Facebook"] = a["href"]
         if "instagram.com" in href and not social["Instagram"]:
-            social["Instagram"] = href
+            social["Instagram"] = a["href"]
         if "linkedin.com" in href and not social["LinkedIn"]:
-            social["LinkedIn"] = href
+            social["LinkedIn"] = a["href"]
         if ("twitter.com" in href or "x.com" in href) and not social["Twitter / X"]:
-            social["Twitter / X"] = href
+            social["Twitter / X"] = a["href"]
 
     return social
+
 
 # ---------------- Contact Extraction (Multi) ----------------
 def extract_all_emails(text: str, html: str = None) -> list:
@@ -291,12 +352,13 @@ def extract_all_emails(text: str, html: str = None) -> list:
     
     return valid_emails if valid_emails else []
 
+
 def extract_all_phones(text):
+    """Extract all valid phone numbers, removing duplicates."""
     if not text:
         return []
     
     phones = []
-    # Multiple patterns for different phone formats
     patterns = [
         r'\+?\d{1,4}[-.\s]?$?\d{1,4}$?[-.\s]?\d{1,4}[-.\s]?\d{1,9}',
         r'\+?\d[\d\-\s()]{8,15}',
@@ -310,14 +372,19 @@ def extract_all_phones(text):
     
     # Clean and deduplicate
     cleaned_phones = []
+    seen_digits = set()
+    
     for phone in phones:
         phone = phone.strip()
-        # Must have at least 10 digits
         digits = re.sub(r'\D', '', phone)
-        if len(digits) >= 10 and len(digits) <= 15:
+        
+        # Must have at least 10 digits and not seen before
+        if len(digits) >= 10 and len(digits) <= 15 and digits not in seen_digits:
             cleaned_phones.append(phone)
+            seen_digits.add(digits)
     
-    return list(set(cleaned_phones))
+    return cleaned_phones
+
 
 def extract_all_addresses(text):
     """
@@ -336,7 +403,7 @@ def extract_all_addresses(text):
         addr = addr.strip()
         
         # Must contain address keywords
-        if re.search(r'\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|complex|building|floor|suite|office|near|opposite|highway|hwy|mall|square|circle|nagar|society)\b', addr, re.IGNORECASE):
+        if re.search(r'\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|complex|building|floor|suite|office|near|opposite|highway|hwy|mall|square|circle|nagar|society|tower|plaza|block|sector|phase)\b', addr, re.IGNORECASE):
             # Skip if it has dates/years
             if not re.search(r'\b(19|20)\d{2}\b', addr):
                 # Skip if too many digits (phone numbers)
@@ -344,7 +411,8 @@ def extract_all_addresses(text):
                 if digit_ratio < 0.3:
                     valid_addresses.append(addr)
     
-    return list(set(valid_addresses))
+    return clean_address_list(valid_addresses)
+
 
 # ---------------- Smart Chunking ----------------
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
@@ -365,6 +433,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         chunks.append(current.strip())
 
     return chunks
+
 
 # ---------------- Sitemap (Improved) ----------------
 def get_urls_from_sitemap(url):
@@ -401,6 +470,7 @@ def get_urls_from_sitemap(url):
     except:
         return []
 
+
 def get_urls_from_firecrawl(base_url):
     if not FIRECRAWL_KEY:
         return []
@@ -413,6 +483,7 @@ def get_urls_from_firecrawl(base_url):
         return [x["url"] for x in r.json().get("links", [])]
     except:
         return []
+
 
 def get_site_urls(base):
     s = get_urls_from_sitemap(base)
@@ -428,6 +499,7 @@ def get_site_urls(base):
 
     return [base]
 
+
 # ---------------- Main Page Selection ----------------
 def select_main_pages(urls, base):
     pages = []
@@ -435,13 +507,16 @@ def select_main_pages(urls, base):
 
     for u in urls:
         ul = u.lower()
-        if "about" in ul: pages.append(u)
-        if "contact" in ul: pages.append(u)
+        if "about" in ul: 
+            pages.append(u)
+        if "contact" in ul: 
+            pages.append(u)
 
     if base not in pages:
         pages.insert(0, base)
 
-    return pages[:3]
+    return list(dict.fromkeys(pages))[:3]  # Remove duplicates, keep order, limit to 3
+
 
 # ---------------- RAG Extraction ----------------
 def sanitize_collection_name(url):
@@ -450,7 +525,8 @@ def sanitize_collection_name(url):
     name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
     if not name:
         name = "default"
-    return f"collection_{name}"
+    return f"collection_{name}"[:63]  # ChromaDB name limit
+
 
 def rag_extract(chunks, site_url):
     """
@@ -532,13 +608,15 @@ Extract the following fields:
 4. **Email**: All business email addresses (as array)
    - ONLY include valid email addresses in format: name@domain.com
    - DO NOT include "[email protected]" or "[email protected]" - these are PROTECTED/INVALID
+   - DO NOT include duplicates (case-insensitive)
    - If you cannot find a valid email, return empty array []
 
 5. **Phone**: All business phone numbers (as array)
+   - DO NOT include duplicates
 
 6. **Address**: ONLY complete physical office/business addresses (as array)
    - MUST include: Street number, street/building name, area/locality, city, state/region
-   - MUST contain address keywords like: Street, Road, Complex, Building, Mall, Highway, Avenue, Lane, Square, Nagar, Society, Floor, Suite, Office
+   - MUST contain address keywords like: Street, Road, Complex, Building, Mall, Highway, Avenue, Lane, Square, Nagar, Society, Floor, Suite, Office, Tower, Plaza
    - DO NOT include:
      * Business hours (e.g., "10:00 AM - 7:00 PM", "Monday - Saturday")
      * Timestamps or dates (e.g., "2017", "2025", "15-January-2017")
@@ -547,6 +625,7 @@ Extract the following fields:
      * Phone numbers appearing alone
      * Promotional text or website content
      * Incomplete fragments
+   - DO NOT include duplicates
 
 7. **Facebook**: Facebook page URL (if found)
 
@@ -563,6 +642,7 @@ Extract the following fields:
 IMPORTANT RULES:
 - Return ONLY valid, complete information
 - For emails: NEVER return "[email protected]" or protected emails - return [] instead
+- Remove ALL duplicates (case-insensitive for emails)
 - For addresses, be VERY strict - only extract if it's a complete physical location
 - If a field has no valid data, return empty array [] or empty string ""
 - Return clean, properly formatted JSON ONLY (no markdown, no code blocks)
@@ -584,33 +664,55 @@ Website content to extract from:
     try:
         data = json.loads(out)
         
-        # Post-process to clean emails
+        # Post-process to clean and deduplicate all fields
         if "Email" in data:
-            data["Email"] = clean_email_list(data["Email"] if isinstance(data["Email"], list) else [data["Email"]])
+            emails = data["Email"] if isinstance(data["Email"], list) else [data["Email"]] if data["Email"] else []
+            data["Email"] = clean_email_list(emails)
+        
+        if "Phone" in data:
+            phones = data["Phone"] if isinstance(data["Phone"], list) else [data["Phone"]] if data["Phone"] else []
+            data["Phone"] = clean_phone_list(phones)
+            
+        if "Address" in data:
+            addresses = data["Address"] if isinstance(data["Address"], list) else [data["Address"]] if data["Address"] else []
+            data["Address"] = clean_address_list(addresses)
         
         return data
     except:
         return {"raw": out}
 
+
 # ---------------- Logo Extraction ----------------
 def extract_logo_url(html, base_url):
     """Find logo URL from common locations."""
+    if not html:
+        return ""
+        
     soup = BeautifulSoup(html, "html.parser")
 
     logo_keywords = ["logo", "brand", "site-logo", "header-logo"]
+    
+    # Look for <img> with logo keywords
     for img in soup.find_all("img", src=True):
         src = img["src"].lower()
         alt = (img.get("alt") or "").lower()
+        class_attr = " ".join(img.get("class", [])).lower()
+        id_attr = (img.get("id") or "").lower()
 
-        if any(key in src for key in logo_keywords) or any(key in alt for key in logo_keywords):
+        if any(key in src for key in logo_keywords) or \
+           any(key in alt for key in logo_keywords) or \
+           any(key in class_attr for key in logo_keywords) or \
+           any(key in id_attr for key in logo_keywords):
             return urllib.parse.urljoin(base_url, img["src"])
 
+    # Look inside <link rel="icon">
     for link in soup.find_all("link", href=True):
-        rel = (link.get("rel") or [""])[0]
-        if "icon" in rel or "shortcut icon" in rel or "apple-touch-icon" in rel:
+        rel = " ".join(link.get("rel", []))
+        if "icon" in rel or "shortcut" in rel or "apple-touch-icon" in rel:
             return urllib.parse.urljoin(base_url, link["href"])
 
     return ""
+
 
 # ---------------- Main Flow ----------------
 if __name__ == "__main__":
@@ -657,31 +759,36 @@ if __name__ == "__main__":
     print("\n🧠 Running RAG…")
     data = rag_extract(chunks, site_url)
 
-    # fallback extraction — MULTIPLE (now with HTML for Cloudflare decoding)
+    # Fallback extraction with deduplication
     extracted_emails = extract_all_emails(all_text, all_html)
-    if not data.get("Email") or not clean_email_list(data.get("Email", [])):
-        data["Email"] = extracted_emails
-    else:
-        # Merge and clean
-        existing = data.get("Email", [])
-        if isinstance(existing, str):
-            existing = [existing]
-        all_emails = list(set(existing + extracted_emails))
-        data["Email"] = clean_email_list(all_emails)
-    
-    data["Phone"] = data.get("Phone") or extract_all_phones(all_text)
-    data["Address"] = data.get("Address") or extract_all_addresses(all_text)
+    existing_emails = data.get("Email", [])
+    if isinstance(existing_emails, str):
+        existing_emails = [existing_emails] if existing_emails else []
+    all_emails = existing_emails + extracted_emails
+    data["Email"] = clean_email_list(all_emails)
 
-    # social links
+    # Clean phones
+    extracted_phones = extract_all_phones(all_text)
+    existing_phones = data.get("Phone", [])
+    if isinstance(existing_phones, str):
+        existing_phones = [existing_phones] if existing_phones else []
+    all_phones = existing_phones + extracted_phones
+    data["Phone"] = clean_phone_list(all_phones)
+
+    # Clean addresses
+    extracted_addresses = extract_all_addresses(all_text)
+    existing_addresses = data.get("Address", [])
+    if isinstance(existing_addresses, str):
+        existing_addresses = [existing_addresses] if existing_addresses else []
+    all_addresses = existing_addresses + extracted_addresses
+    data["Address"] = clean_address_list(all_addresses)
+
+    # Social links
     for k, v in all_social.items():
         if v:
             data[k] = v
 
     data["URL"] = site_url
-
-    # Final cleanup - ensure no protected emails slip through
-    if "Email" in data:
-        data["Email"] = clean_email_list(data["Email"] if isinstance(data["Email"], list) else [])
 
     print("\n\n✅ Final Extracted Data:")
     print(json.dumps(data, indent=2, ensure_ascii=False))
