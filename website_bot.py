@@ -1194,7 +1194,8 @@ def extract_all_phones(text: str) -> list:
 
 def extract_all_addresses(text: str) -> list:
     """
-    Extract genuine physical addresses - supports US and Indian formats.
+    Extract physical addresses - supports Indian, US, and international formats.
+    Ensures FULL address is captured including building numbers.
     """
     if not text:
         return []
@@ -1202,96 +1203,165 @@ def extract_all_addresses(text: str) -> list:
     valid_addresses = []
     
     try:
-        # Pattern 1: Starts with number (like "415, Aastha 99...")
-        pattern1 = r'\b(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.-]{10,120}(?:\d{6}|\d{5}))\b'
-        
-        # Pattern 2: Contains PIN code at end (Indian: 6 digits)
-        pattern2 = r'([A-Za-z0-9][A-Za-z0-9\s,.-]{15,120}\s+\d{6})\b'
-        
-        # Pattern 3: Contains ZIP at end (US: 5 digits)
-        pattern3 = r'([A-Za-z0-9][A-Za-z0-9\s,.-]{15,100}\s+[A-Z]{2}\s*\d{5})\b'
-        
         potential = []
-        for pattern in [pattern1, pattern2, pattern3]:
-            try:
-                found = re.findall(pattern, str(text))
-                potential.extend(found)
-            except:
-                continue
         
-        # Address keywords (Indian + US)
+        # Strategy 1: Find text around PIN codes (Indian 6-digit)
+        # Look FURTHER BACK to capture building numbers
+        pin_matches = list(re.finditer(r'\b(\d{6})\b', text))
+        for match in pin_matches:
+            # Look back further (200 chars) to capture full address
+            start = max(0, match.start() - 200)
+            end = min(len(text), match.end() + 10)
+            context = text[start:end].strip()
+            
+            # Find a good starting point (number, or after common delimiters)
+            # Look for address start patterns
+            address_start_patterns = [
+                r'\b(\d{1,5}[,\s])',  # Starts with number
+                r'(?:Address|Location|Office)[:\s]+',  # After label
+                r'(?:\.\s+|\n\s*)(\d{1,5}[,\s])',  # After sentence, starts with number
+            ]
+            
+            best_start = 0
+            for pattern in address_start_patterns:
+                match_start = re.search(pattern, context, re.IGNORECASE)
+                if match_start:
+                    best_start = match_start.start()
+                    break
+            
+            # If we found a number at start, use it
+            number_match = re.search(r'\b(\d{1,5})[,\s]+[A-Za-z]', context)
+            if number_match and number_match.start() < 50:  # Number within first 50 chars
+                best_start = number_match.start()
+            
+            context = context[best_start:].strip()
+            
+            # Clean up - remove text after PIN code
+            pin_in_context = re.search(r'\b\d{6}\b', context)
+            if pin_in_context:
+                context = context[:pin_in_context.end()].strip()
+            
+            if len(context) > 20:
+                potential.append(context)
+        
+        # Strategy 2: Direct pattern for Indian addresses starting with number
+        indian_pattern = r'(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.\-/\'\"]+?(?:Gujarat|Maharashtra|Delhi|Karnataka|Rajasthan|Tamil Nadu|India)[,\s]*\d{6})'
+        try:
+            matches = re.findall(indian_pattern, text, re.IGNORECASE)
+            potential.extend(matches)
+        except:
+            pass
+        
+        # Strategy 3: Pattern with building/tower/floor
+        building_pattern = r'(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.\-/\'\"]+?(?:Tower|Building|Floor|Complex|Plaza|Block|Office)[A-Za-z0-9\s,.\-/\'\"]+?\d{6})'
+        try:
+            matches = re.findall(building_pattern, text, re.IGNORECASE)
+            potential.extend(matches)
+        except:
+            pass
+        
+        # Strategy 4: Look for address after specific labels
+        label_pattern = r'(?:Address|Location|Office|Headquarters|Contact)[:\s]+(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.\-/\'\"]{15,180}?\d{6})'
+        try:
+            matches = re.findall(label_pattern, text, re.IGNORECASE)
+            potential.extend(matches)
+        except:
+            pass
+        
+        # Strategy 5: Generic pattern - number followed by text ending in PIN
+        generic_pattern = r'(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.\-/\'\"]{20,180}?\b\d{6})\b'
+        try:
+            matches = re.findall(generic_pattern, text)
+            potential.extend(matches)
+        except:
+            pass
+        
+        # Strategy 6: US ZIP pattern
+        us_pattern = r'(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.\-]{15,100}\s+[A-Z]{2}\s*\d{5}(?:-\d{4})?)'
+        try:
+            matches = re.findall(us_pattern, text)
+            potential.extend(matches)
+        except:
+            pass
+        
+        # Keywords for validation
         address_keywords = [
-            'tower', 'colony', 'society', 'nagar', 'complex', 'plaza',
-            'building', 'floor', 'block', 'sector', 'phase', 'road',
-            'street', 'lane', 'avenue', 'drive', 'marg', 'chowk',
-            'bh', 'near', 'opposite', 'behind', 'c.t.m', 'ctm',
-            'aastha', 'vihar', 'enclave', 'garden', 'park'
+            'floor', 'tower', 'block', 'building', 'complex', 'plaza', 'office',
+            'nagar', 'colony', 'society', 'road', 'street', 'lane', 'avenue',
+            'sector', 'phase', 'near', 'opposite', 'marg', 'chowk', 'bh.', 'nr.'
         ]
         
-        # Indian states and cities
-        indian_locations = [
-            'gujarat', 'maharashtra', 'delhi', 'karnataka', 'rajasthan',
-            'ahmedabad', 'mumbai', 'bangalore', 'chennai', 'pune',
-            'amraiwadi', 'vadodara', 'surat', 'gandhinagar'
+        locations = [
+            'ahmedabad', 'gujarat', 'mumbai', 'maharashtra', 'delhi',
+            'bangalore', 'karnataka', 'chennai', 'india', 'pune',
+            'hyderabad', 'kolkata', 'amraiwadi', 'surat', 'vadodara'
         ]
         
-        # Blacklist words
         blacklist = [
-            'association', 'society for', 'college', 'university',
-            'professor', 'doctor', 'residency', 'speaker', 'director',
-            'medicine', 'respiratory', 'clinical', 'copyright',
-            'reserved', 'privacy', 'terms'
+            'copyright', 'reserved', 'privacy', 'terms', 'cookie',
+            'facebook', 'twitter', 'linkedin', 'instagram', '@',
+            'click', 'subscribe', 'newsletter', 'loading'
         ]
         
         for addr in potential:
-            addr = addr.strip()
+            if not isinstance(addr, str):
+                continue
+                
+            addr = str(addr).strip()
             addr_lower = addr.lower()
             
-            # Minimum length
-            if len(addr) < 20:
+            # Length check
+            if len(addr) < 20 or len(addr) > 300:
+                continue
+            
+            # Blacklist check
+            if any(bl in addr_lower for bl in blacklist):
                 continue
             
             # Must have PIN/ZIP
-            has_pin = bool(re.search(r'\b\d{6}\b', addr))  # Indian PIN
-            has_zip = bool(re.search(r'\b\d{5}\b', addr))  # US ZIP
+            has_pin = bool(re.search(r'\b\d{6}\b', addr))
+            has_zip = bool(re.search(r'\b\d{5}\b', addr))
             
             if not (has_pin or has_zip):
                 continue
             
-            # Should have address keyword OR Indian location
+            # Should have keyword or location
             has_keyword = any(kw in addr_lower for kw in address_keywords)
-            has_location = any(loc in addr_lower for loc in indian_locations)
+            has_location = any(loc in addr_lower for loc in locations)
             
-            if not (has_keyword or has_location):
-                continue
-            
-            # Must NOT have blacklist words
-            if any(bl in addr_lower for bl in blacklist):
-                continue
-            
-            # Clean up
-            addr = addr.strip().rstrip('.,;:')
-            
-            valid_addresses.append(addr)
-            
-    except Exception:
-        pass
+            if has_pin or has_zip or has_keyword or has_location:
+                # Clean up
+                addr = re.sub(r'\s+', ' ', addr).strip()
+                addr = addr.strip('.,;:|')
+                addr = re.sub(r'$$email.*?$$', '', addr).strip()
+                
+                if len(addr) >= 20:
+                    valid_addresses.append(addr)
+                    
+    except Exception as e:
+        print(f"Address extraction error: {e}")
     
     return deduplicate_addresses(valid_addresses)
 
 def deduplicate_addresses(addresses: list) -> list:
     """
     Remove duplicate addresses, including partial matches.
-    Keeps the cleanest/most complete version.
+    ALWAYS keeps the LONGEST/MOST COMPLETE version.
     """
     if not addresses:
         return []
     
+    # Sort by length (longest first) - so we process complete addresses first
+    sorted_addresses = sorted(addresses, key=len, reverse=True)
+    
     cleaned = []
     
-    for addr in addresses:
+    for addr in sorted_addresses:
+        if not isinstance(addr, str):
+            continue
+            
         addr = addr.strip()
-        if not addr:
+        if not addr or len(addr) < 10:
             continue
             
         # Normalize for comparison
@@ -1306,26 +1376,18 @@ def deduplicate_addresses(addresses: list) -> list:
             
             # Check if one contains the other
             if addr_normalized in existing_normalized:
-                # Current is substring of existing - skip current
+                # Current is substring of existing (existing is longer/better)
+                # Skip current - we already have a better version
                 is_duplicate = True
                 break
             elif existing_normalized in addr_normalized:
-                # Existing is substring of current
-                # Keep the SHORTER one if it looks complete (has zip/state)
-                existing_complete = bool(re.search(r'\b[A-Z]{2}\s*\d{5}|\b\d{5,6}\b', existing))
-                current_complete = bool(re.search(r'\b[A-Z]{2}\s*\d{5}|\b\d{5,6}\b', addr))
-                
-                if existing_complete and len(existing) < len(addr):
-                    # Keep existing (shorter but complete)
-                    is_duplicate = True
-                    break
-                else:
-                    # Replace with current if it's more complete
-                    cleaned[i] = addr if current_complete else existing
-                    is_duplicate = True
-                    break
+                # Existing is substring of current (current is longer/better)
+                # Replace existing with current (the longer one)
+                cleaned[i] = addr
+                is_duplicate = True
+                break
             
-            # Check word overlap
+            # Check word overlap for fuzzy matching
             words1 = set(addr_normalized.split())
             words2 = set(existing_normalized.split())
             
@@ -1333,22 +1395,18 @@ def deduplicate_addresses(addresses: list) -> list:
                 intersection = words1 & words2
                 smaller_set = min(len(words1), len(words2))
                 
-                if smaller_set > 0 and len(intersection) / smaller_set > 0.8:
-                    # 80% overlap - likely same address
-                    # Keep the cleaner/shorter one
-                    if len(existing) <= len(addr):
-                        is_duplicate = True
-                        break
-                    else:
-                        cleaned[i] = addr
-                        is_duplicate = True
-                        break
+                if smaller_set > 0 and len(intersection) / smaller_set > 0.7:
+                    # 70% overlap - likely same address
+                    # Keep the LONGER one (more complete)
+                    if len(addr) > len(existing):
+                        cleaned[i] = addr  # Replace with longer
+                    is_duplicate = True
+                    break
         
         if not is_duplicate:
             cleaned.append(addr)
     
     return cleaned
-
 
 def clean_address_list(addresses: list) -> list:
     """
