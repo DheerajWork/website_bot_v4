@@ -1161,6 +1161,7 @@ def extract_all_addresses(text: str) -> list:
     """
     Strict address extraction - only extracts genuine physical addresses.
     Filters out text that happens to start with numbers but isn't an address.
+    Supports US, Indian, and international address formats.
     """
     if not text:
         return []
@@ -1168,13 +1169,31 @@ def extract_all_addresses(text: str) -> list:
     valid_addresses = []
     
     try:
-        # More restrictive pattern: number + street name pattern
-        # Must have number, then words, then address indicator
-        pattern = r'\d{1,5}\s+[A-Za-z][A-Za-z0-9\s,.-]{10,150}'
-        potential_addresses = re.findall(pattern, str(text))
+        # Pattern 1: Starts with number (US/Western style)
+        pattern1 = r'\d{1,5}\s+[A-Za-z][A-Za-z0-9\s,.-]{10,150}'
         
-        # Address keywords that indicate a REAL address
+        # Pattern 2: Indian addresses - may start with building/floor number or name
+        # Examples: "415, Aastha 99, Bh. Bharvi Tower..." or "A-101, Some Complex..."
+        pattern2 = r'[A-Za-z0-9]{1,5}[-/]?\d{0,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.-]{15,150}'
+        
+        # Pattern 3: Addresses that contain PIN code (Indian 6-digit)
+        pattern3 = r'[A-Za-z0-9\s,.-]{20,150}\s+\d{6}\b'
+        
+        # Pattern 4: Addresses that contain ZIP code (US 5-digit)
+        pattern4 = r'[A-Za-z0-9\s,.-]{20,150}\s+\d{5}(?:-\d{4})?\b'
+        
+        potential_addresses = []
+        
+        for pattern in [pattern1, pattern2, pattern3, pattern4]:
+            try:
+                found = re.findall(pattern, str(text))
+                potential_addresses.extend(found)
+            except Exception:
+                continue
+        
+        # Address keywords that indicate a REAL address (expanded for Indian addresses)
         address_keywords = [
+            # US/Western
             'street', 'st', 'road', 'rd', 'avenue', 'ave', 'lane', 'ln', 
             'drive', 'dr', 'boulevard', 'blvd', 'way', 'court', 'ct',
             'place', 'pl', 'terrace', 'circle', 'highway', 'hwy',
@@ -1183,8 +1202,69 @@ def extract_all_addresses(text: str) -> list:
             'floor', 'suite', 'ste', 'unit', 'apt', 'apartment',
             'building', 'bldg', 'tower', 'plaza', 'complex', 'mall',
             'office', 'block', 'sector', 'phase',
-            # Indian/International
-            'nagar', 'society', 'colony', 'near', 'opposite', 'opp'
+            # Indian/International specific
+            'nagar', 'society', 'colony', 'near', 'opposite', 'opp',
+            'behind', 'bh', 'beside', 'above', 'below',
+            'chowk', 'chowki', 'gali', 'mohalla', 'marg', 'path',
+            'vihar', 'enclave', 'park', 'garden', 'residency',
+            'heights', 'villa', 'apartment', 'flats', 'house',
+            'crossing', 'circle', 'square', 'main', 'cross',
+            'industrial', 'estate', 'area', 'zone',
+            # Common Indian area identifiers
+            'c.t.m', 'ctm', 'gidc', 'midc', 'riico', 'sidco',
+        ]
+        
+        # Indian states (for validation)
+        indian_states = [
+            'gujarat', 'maharashtra', 'delhi', 'karnataka', 'tamil nadu',
+            'kerala', 'rajasthan', 'punjab', 'haryana', 'uttar pradesh',
+            'madhya pradesh', 'andhra pradesh', 'telangana', 'west bengal',
+            'bihar', 'odisha', 'assam', 'jharkhand', 'chhattisgarh',
+            'uttarakhand', 'himachal pradesh', 'goa', 'jammu', 'kashmir',
+            'sikkim', 'arunachal pradesh', 'nagaland', 'manipur', 'mizoram',
+            'tripura', 'meghalaya'
+        ]
+        
+        # Indian cities (major ones)
+        indian_cities = [
+            'ahmedabad', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 'chennai',
+            'kolkata', 'hyderabad', 'pune', 'jaipur', 'lucknow', 'kanpur',
+            'nagpur', 'indore', 'thane', 'bhopal', 'visakhapatnam', 'pimpri',
+            'patna', 'vadodara', 'ghaziabad', 'ludhiana', 'agra', 'nashik',
+            'faridabad', 'meerut', 'rajkot', 'varanasi', 'srinagar', 'aurangabad',
+            'dhanbad', 'amritsar', 'allahabad', 'ranchi', 'howrah', 'coimbatore',
+            'jabalpur', 'gwalior', 'vijayawada', 'jodhpur', 'madurai', 'raipur',
+            'kota', 'surat', 'chandigarh', 'noida', 'gurgaon', 'gurugram',
+            'amraiwadi', 'gandhinagar', 'anand', 'bharuch', 'bhavnagar',
+            'jamnagar', 'junagadh', 'mehsana', 'morbi', 'nadiad', 'navsari',
+            'porbandar', 'rajkot', 'surendranagar', 'valsad', 'vapi'
+        ]
+        
+        # US states
+        us_states = [
+            'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
+            'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+            'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana',
+            'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota',
+            'mississippi', 'missouri', 'montana', 'nebraska', 'nevada',
+            'new hampshire', 'new jersey', 'new mexico', 'new york',
+            'north carolina', 'north dakota', 'ohio', 'oklahoma', 'oregon',
+            'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
+            'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington',
+            'west virginia', 'wisconsin', 'wyoming'
+        ]
+        
+        # US cities (major ones)
+        us_cities = [
+            'new york', 'los angeles', 'chicago', 'houston', 'phoenix',
+            'philadelphia', 'san antonio', 'san diego', 'dallas', 'san jose',
+            'austin', 'jacksonville', 'fort worth', 'columbus', 'charlotte',
+            'seattle', 'denver', 'boston', 'nashville', 'detroit', 'portland',
+            'las vegas', 'memphis', 'louisville', 'baltimore', 'milwaukee',
+            'albuquerque', 'tucson', 'fresno', 'sacramento', 'mesa', 'atlanta',
+            'kansas city', 'colorado springs', 'miami', 'raleigh', 'omaha',
+            'long beach', 'virginia beach', 'oakland', 'minneapolis', 'tulsa',
+            'arlington', 'tampa', 'new orleans', 'stroudsburg', 'east stroudsburg'
         ]
         
         # Words that indicate this is NOT an address (bio/content text)
@@ -1205,6 +1285,8 @@ def extract_all_addresses(text: str) -> list:
             'click', 'learn more', 'read more', 'contact us',
             'webinar', 'conference', 'education', 'ceus', 'free',
             'unlimited', 'subscribe', 'sign up', 'login',
+            'copyright', 'all rights', 'reserved', 'privacy policy',
+            'terms of', 'conditions', 'disclaimer',
         ]
         
         for addr in potential_addresses:
@@ -1213,18 +1295,7 @@ def extract_all_addresses(text: str) -> list:
                 addr_lower = addr.lower()
                 
                 # Skip if too short
-                if len(addr) < 20:
-                    continue
-                
-                # MUST contain at least one address keyword
-                has_address_keyword = False
-                for keyword in address_keywords:
-                    # Use word boundary to avoid partial matches
-                    if re.search(r'\b' + re.escape(keyword) + r'\b', addr_lower):
-                        has_address_keyword = True
-                        break
-                
-                if not has_address_keyword:
+                if len(addr) < 15:
                     continue
                 
                 # MUST NOT contain non-address indicators
@@ -1241,39 +1312,59 @@ def extract_all_addresses(text: str) -> list:
                 if re.search(r'\b(19|20)\d{2}\b', addr):
                     continue
                 
-                # Skip if digit ratio is too high (phone numbers, etc.)
-                digit_count = sum(c.isdigit() for c in addr)
-                if digit_count / max(len(addr), 1) > 0.25:
-                    continue
-                
                 # Skip if it has too many words (likely a paragraph, not address)
                 word_count = len(addr.split())
                 if word_count > 25:
                     continue
                 
-                # Skip if it doesn't have a proper structure
-                # Good addresses usually have: number + name + city/state or zip
-                # Check for state abbreviation or zip code pattern
-                has_location_end = bool(
-                    re.search(r'\b[A-Z]{2}\s*\d{5}', addr) or  # State + ZIP (US)
-                    re.search(r'\b\d{5,6}\b', addr) or  # ZIP/PIN code
-                    re.search(r'\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|gujarat|maharashtra|delhi|karnataka|tamil nadu|kerala|rajasthan|punjab|haryana|uttar pradesh|madhya pradesh|andhra pradesh|telangana|west bengal|bihar|odisha|assam|jharkhand|chhattisgarh|uttarakhand|himachal pradesh|goa)\b', addr_lower) or  # State names
-                    re.search(r'\b(usa|india|uk|canada|australia)\b', addr_lower)  # Country
-                )
+                # Check if it has address indicators
+                has_address_keyword = False
+                for keyword in address_keywords:
+                    if re.search(r'\b' + re.escape(keyword) + r'\b', addr_lower):
+                        has_address_keyword = True
+                        break
                 
-                if not has_location_end:
-                    # Check for city names (common ones)
-                    has_city = bool(re.search(
-                        r'\b(new york|los angeles|chicago|houston|phoenix|philadelphia|san antonio|san diego|dallas|san jose|austin|jacksonville|fort worth|columbus|charlotte|seattle|denver|boston|nashville|detroit|portland|las vegas|memphis|louisville|baltimore|milwaukee|albuquerque|tucson|fresno|sacramento|mesa|atlanta|kansas city|colorado springs|miami|raleigh|omaha|long beach|virginia beach|oakland|minneapolis|tulsa|arlington|tampa|new orleans|ahmedabad|mumbai|delhi|bangalore|chennai|kolkata|hyderabad|pune|jaipur|lucknow|kanpur|nagpur|indore|thane|bhopal|visakhapatnam|pimpri|patna|vadodara|ghaziabad|ludhiana|agra|nashik|faridabad|meerut|rajkot|varanasi|srinagar|aurangabad|dhanbad|amritsar|allahabad|ranchi|howrah|coimbatore|jabalpur|gwalior|vijayawada|jodhpur|madurai|raipur|kota|stroudsburg|east stroudsburg)\b',
-                        addr_lower
-                    ))
-                    if not has_city:
-                        continue
+                # Check for PIN/ZIP code
+                has_pin_zip = bool(re.search(r'\b\d{5,6}\b', addr))
+                
+                # Check for Indian state/city
+                has_indian_location = any(state in addr_lower for state in indian_states) or \
+                                      any(city in addr_lower for city in indian_cities)
+                
+                # Check for US state/city
+                has_us_location = any(state in addr_lower for state in us_states) or \
+                                  any(city in addr_lower for city in us_cities)
+                
+                # Check for state abbreviation + ZIP (US pattern)
+                has_state_zip = bool(re.search(r'\b[A-Z]{2}\s*\d{5}', addr))
+                
+                # Address is valid if it has:
+                # 1. Address keyword + (PIN/ZIP OR location)
+                # 2. OR PIN/ZIP + location
+                # 3. OR State abbreviation + ZIP
+                is_valid_address = False
+                
+                if has_address_keyword and (has_pin_zip or has_indian_location or has_us_location):
+                    is_valid_address = True
+                elif has_pin_zip and (has_indian_location or has_us_location):
+                    is_valid_address = True
+                elif has_state_zip:
+                    is_valid_address = True
+                elif has_address_keyword and has_address_keyword:
+                    # Has multiple address indicators - likely valid
+                    keyword_count = sum(1 for kw in address_keywords if kw in addr_lower)
+                    if keyword_count >= 2:
+                        is_valid_address = True
+                
+                if not is_valid_address:
+                    continue
+                
+                # Skip if digit ratio is too high (phone numbers, etc.)
+                digit_count = sum(c.isdigit() for c in addr)
+                if len(addr) > 0 and digit_count / len(addr) > 0.3:
+                    continue
                 
                 # Clean up: truncate at common end-of-address indicators
-                # (removes navigation text that got appended)
-                # Clean up: truncate at common end-of-address indicators
-                # (removes navigation text that got appended)
                 truncate_patterns = [
                     r'\s+home\s+',
                     r'\s+menu\s+',
@@ -1290,6 +1381,10 @@ def extract_all_addresses(text: str) -> list:
                     r'\s+click\s+',
                     r'\s+learn\s+',
                     r'\s+read\s+',
+                    r'\s+phone\s*:',
+                    r'\s+email\s*:',
+                    r'\s+tel\s*:',
+                    r'\s+fax\s*:',
                 ]
                 
                 for tp in truncate_patterns:
@@ -1298,8 +1393,11 @@ def extract_all_addresses(text: str) -> list:
                         addr = addr[:match.start()].strip()
                         break
                 
+                # Remove trailing punctuation
+                addr = addr.rstrip('.,;:')
+                
                 # Final length check after truncation
-                if len(addr) >= 20:
+                if len(addr) >= 15:
                     valid_addresses.append(addr)
                     
             except Exception:
