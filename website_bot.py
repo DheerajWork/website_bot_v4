@@ -277,8 +277,11 @@ def clean_phone_list(phones: list) -> list:
 def fetch_page(url: str) -> str:
     """
     First try Requests.
-    If blocked, try Firecrawl HTML extraction (if API key exists).
+    If content is too small or blocked, try Firecrawl with JS rendering.
     """
+    html = ""
+    
+    # Try regular requests first
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -286,26 +289,58 @@ def fetch_page(url: str) -> str:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         }
         r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code == 200 and len(r.text) > 200:
-            return r.text
+        if r.status_code == 200:
+            html = r.text
     except Exception:
         pass
 
-    # Firecrawl fallback
-    if FIRECRAWL_KEY:
+    # Check if we got meaningful content
+    # Next.js/React sites often have very little actual text content in initial HTML
+    has_meaningful_content = False
+    if html:
+        # Check for common signs of JS-rendered content
+        soup = BeautifulSoup(html, "html.parser")
+        text_content = soup.get_text(" ", strip=True)
+        
+        # If text is too short OR contains Next.js indicators, content is likely JS-rendered
+        is_nextjs = "__next" in html or "self.__next_f" in html or "_next/static" in html
+        is_react = "react" in html.lower() and "__NEXT_DATA__" in html
+        
+        if len(text_content) > 1000 and not is_nextjs:
+            has_meaningful_content = True
+        
+        # Also check if we found address/contact info
+        if "380" in text_content or "ahmedabad" in text_content.lower():
+            has_meaningful_content = True
+
+    # Use Firecrawl if content seems JS-rendered or too small
+    if not has_meaningful_content and FIRECRAWL_KEY:
+        print(f"   🔥 Using Firecrawl for JS rendering: {url}")
         try:
-            fc_url = "https://api.firecrawl.dev/v2/scrape"
-            headers = {"Authorization": f"Bearer {FIRECRAWL_KEY}"}
-            payload = {"url": url, "formats": ["html"]}
+            fc_url = "https://api.firecrawl.dev/v1/scrape"
+            headers = {
+                "Authorization": f"Bearer {FIRECRAWL_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "url": url,
+                "formats": ["html"],
+                "waitFor": 3000,  # Wait 3 seconds for JS to render
+                "timeout": 30000
+            }
 
-            fc = requests.post(fc_url, json=payload, headers=headers, timeout=20)
-            html = fc.json().get("html", "")
-            return html
-        except Exception:
-            pass
+            fc = requests.post(fc_url, json=payload, headers=headers, timeout=60)
+            fc_data = fc.json()
+            
+            if fc_data.get("success"):
+                fc_html = fc_data.get("data", {}).get("html", "")
+                if fc_html and len(fc_html) > len(html):
+                    html = fc_html
+                    print(f"   ✅ Firecrawl returned {len(fc_html)} chars")
+        except Exception as e:
+            print(f"   ⚠️ Firecrawl error: {e}")
 
-    return ""
-
+    return html if html and len(html) > 200 else ""
 
 # ---------------- Enhanced Social Links Extraction ----------------
 def extract_social_links_from_html(html):
@@ -1159,9 +1194,7 @@ def extract_all_phones(text: str) -> list:
 
 def extract_all_addresses(text: str) -> list:
     """
-    Strict address extraction - only extracts genuine physical addresses.
-    Filters out text that happens to start with numbers but isn't an address.
-    Supports US, Indian, and international address formats.
+    Extract genuine physical addresses - supports US and Indian formats.
     """
     if not text:
         return []
@@ -1169,246 +1202,82 @@ def extract_all_addresses(text: str) -> list:
     valid_addresses = []
     
     try:
-        # Pattern 1: Starts with number (US/Western style)
-        pattern1 = r'\d{1,5}\s+[A-Za-z][A-Za-z0-9\s,.-]{10,150}'
+        # Pattern 1: Starts with number (like "415, Aastha 99...")
+        pattern1 = r'\b(\d{1,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.-]{10,120}(?:\d{6}|\d{5}))\b'
         
-        # Pattern 2: Indian addresses - may start with building/floor number or name
-        # Examples: "415, Aastha 99, Bh. Bharvi Tower..." or "A-101, Some Complex..."
-        pattern2 = r'[A-Za-z0-9]{1,5}[-/]?\d{0,5}[,\s]+[A-Za-z][A-Za-z0-9\s,.-]{15,150}'
+        # Pattern 2: Contains PIN code at end (Indian: 6 digits)
+        pattern2 = r'([A-Za-z0-9][A-Za-z0-9\s,.-]{15,120}\s+\d{6})\b'
         
-        # Pattern 3: Addresses that contain PIN code (Indian 6-digit)
-        pattern3 = r'[A-Za-z0-9\s,.-]{20,150}\s+\d{6}\b'
+        # Pattern 3: Contains ZIP at end (US: 5 digits)
+        pattern3 = r'([A-Za-z0-9][A-Za-z0-9\s,.-]{15,100}\s+[A-Z]{2}\s*\d{5})\b'
         
-        # Pattern 4: Addresses that contain ZIP code (US 5-digit)
-        pattern4 = r'[A-Za-z0-9\s,.-]{20,150}\s+\d{5}(?:-\d{4})?\b'
-        
-        potential_addresses = []
-        
-        for pattern in [pattern1, pattern2, pattern3, pattern4]:
+        potential = []
+        for pattern in [pattern1, pattern2, pattern3]:
             try:
                 found = re.findall(pattern, str(text))
-                potential_addresses.extend(found)
-            except Exception:
+                potential.extend(found)
+            except:
                 continue
         
-        # Address keywords that indicate a REAL address (expanded for Indian addresses)
+        # Address keywords (Indian + US)
         address_keywords = [
-            # US/Western
-            'street', 'st', 'road', 'rd', 'avenue', 'ave', 'lane', 'ln', 
-            'drive', 'dr', 'boulevard', 'blvd', 'way', 'court', 'ct',
-            'place', 'pl', 'terrace', 'circle', 'highway', 'hwy',
-            'parkway', 'pkwy', 'square', 'sq',
-            # Location indicators
-            'floor', 'suite', 'ste', 'unit', 'apt', 'apartment',
-            'building', 'bldg', 'tower', 'plaza', 'complex', 'mall',
-            'office', 'block', 'sector', 'phase',
-            # Indian/International specific
-            'nagar', 'society', 'colony', 'near', 'opposite', 'opp',
-            'behind', 'bh', 'beside', 'above', 'below',
-            'chowk', 'chowki', 'gali', 'mohalla', 'marg', 'path',
-            'vihar', 'enclave', 'park', 'garden', 'residency',
-            'heights', 'villa', 'apartment', 'flats', 'house',
-            'crossing', 'circle', 'square', 'main', 'cross',
-            'industrial', 'estate', 'area', 'zone',
-            # Common Indian area identifiers
-            'c.t.m', 'ctm', 'gidc', 'midc', 'riico', 'sidco',
+            'tower', 'colony', 'society', 'nagar', 'complex', 'plaza',
+            'building', 'floor', 'block', 'sector', 'phase', 'road',
+            'street', 'lane', 'avenue', 'drive', 'marg', 'chowk',
+            'bh', 'near', 'opposite', 'behind', 'c.t.m', 'ctm',
+            'aastha', 'vihar', 'enclave', 'garden', 'park'
         ]
         
-        # Indian states (for validation)
-        indian_states = [
-            'gujarat', 'maharashtra', 'delhi', 'karnataka', 'tamil nadu',
-            'kerala', 'rajasthan', 'punjab', 'haryana', 'uttar pradesh',
-            'madhya pradesh', 'andhra pradesh', 'telangana', 'west bengal',
-            'bihar', 'odisha', 'assam', 'jharkhand', 'chhattisgarh',
-            'uttarakhand', 'himachal pradesh', 'goa', 'jammu', 'kashmir',
-            'sikkim', 'arunachal pradesh', 'nagaland', 'manipur', 'mizoram',
-            'tripura', 'meghalaya'
+        # Indian states and cities
+        indian_locations = [
+            'gujarat', 'maharashtra', 'delhi', 'karnataka', 'rajasthan',
+            'ahmedabad', 'mumbai', 'bangalore', 'chennai', 'pune',
+            'amraiwadi', 'vadodara', 'surat', 'gandhinagar'
         ]
         
-        # Indian cities (major ones)
-        indian_cities = [
-            'ahmedabad', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 'chennai',
-            'kolkata', 'hyderabad', 'pune', 'jaipur', 'lucknow', 'kanpur',
-            'nagpur', 'indore', 'thane', 'bhopal', 'visakhapatnam', 'pimpri',
-            'patna', 'vadodara', 'ghaziabad', 'ludhiana', 'agra', 'nashik',
-            'faridabad', 'meerut', 'rajkot', 'varanasi', 'srinagar', 'aurangabad',
-            'dhanbad', 'amritsar', 'allahabad', 'ranchi', 'howrah', 'coimbatore',
-            'jabalpur', 'gwalior', 'vijayawada', 'jodhpur', 'madurai', 'raipur',
-            'kota', 'surat', 'chandigarh', 'noida', 'gurgaon', 'gurugram',
-            'amraiwadi', 'gandhinagar', 'anand', 'bharuch', 'bhavnagar',
-            'jamnagar', 'junagadh', 'mehsana', 'morbi', 'nadiad', 'navsari',
-            'porbandar', 'rajkot', 'surendranagar', 'valsad', 'vapi'
+        # Blacklist words
+        blacklist = [
+            'association', 'society for', 'college', 'university',
+            'professor', 'doctor', 'residency', 'speaker', 'director',
+            'medicine', 'respiratory', 'clinical', 'copyright',
+            'reserved', 'privacy', 'terms'
         ]
         
-        # US states
-        us_states = [
-            'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
-            'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
-            'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana',
-            'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota',
-            'mississippi', 'missouri', 'montana', 'nebraska', 'nevada',
-            'new hampshire', 'new jersey', 'new mexico', 'new york',
-            'north carolina', 'north dakota', 'ohio', 'oklahoma', 'oregon',
-            'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
-            'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington',
-            'west virginia', 'wisconsin', 'wyoming'
-        ]
-        
-        # US cities (major ones)
-        us_cities = [
-            'new york', 'los angeles', 'chicago', 'houston', 'phoenix',
-            'philadelphia', 'san antonio', 'san diego', 'dallas', 'san jose',
-            'austin', 'jacksonville', 'fort worth', 'columbus', 'charlotte',
-            'seattle', 'denver', 'boston', 'nashville', 'detroit', 'portland',
-            'las vegas', 'memphis', 'louisville', 'baltimore', 'milwaukee',
-            'albuquerque', 'tucson', 'fresno', 'sacramento', 'mesa', 'atlanta',
-            'kansas city', 'colorado springs', 'miami', 'raleigh', 'omaha',
-            'long beach', 'virginia beach', 'oakland', 'minneapolis', 'tulsa',
-            'arlington', 'tampa', 'new orleans', 'stroudsburg', 'east stroudsburg'
-        ]
-        
-        # Words that indicate this is NOT an address (bio/content text)
-        non_address_indicators = [
-            'years', 'year', 'decades', 'decade', 'century',
-            'career', 'experience', 'professional', 'expert',
-            'founded', 'established', 'started', 'began',
-            'clients', 'customers', 'patients', 'students',
-            'services', 'products', 'solutions',
-            'company', 'business', 'industry', 'market',
-            'world', 'global', 'international', 'national',
-            'success', 'award', 'certified', 'licensed',
-            'team', 'staff', 'employees', 'members',
-            'mission', 'vision', 'goal', 'passion',
-            'roamed', 'spanning', 'mastering', 'building a',
-            'fast-paced', 'cutting-edge', 'state-of-the-art',
-            'more pages', 'blog', 'home', 'menu', 'navigation',
-            'click', 'learn more', 'read more', 'contact us',
-            'webinar', 'conference', 'education', 'ceus', 'free',
-            'unlimited', 'subscribe', 'sign up', 'login',
-            'copyright', 'all rights', 'reserved', 'privacy policy',
-            'terms of', 'conditions', 'disclaimer',
-        ]
-        
-        for addr in potential_addresses:
-            try:
-                addr = addr.strip()
-                addr_lower = addr.lower()
-                
-                # Skip if too short
-                if len(addr) < 15:
-                    continue
-                
-                # MUST NOT contain non-address indicators
-                has_non_address = False
-                for indicator in non_address_indicators:
-                    if indicator in addr_lower:
-                        has_non_address = True
-                        break
-                
-                if has_non_address:
-                    continue
-                
-                # Skip if it contains dates/years (like "2020", "1995")
-                if re.search(r'\b(19|20)\d{2}\b', addr):
-                    continue
-                
-                # Skip if it has too many words (likely a paragraph, not address)
-                word_count = len(addr.split())
-                if word_count > 25:
-                    continue
-                
-                # Check if it has address indicators
-                has_address_keyword = False
-                for keyword in address_keywords:
-                    if re.search(r'\b' + re.escape(keyword) + r'\b', addr_lower):
-                        has_address_keyword = True
-                        break
-                
-                # Check for PIN/ZIP code
-                has_pin_zip = bool(re.search(r'\b\d{5,6}\b', addr))
-                
-                # Check for Indian state/city
-                has_indian_location = any(state in addr_lower for state in indian_states) or \
-                                      any(city in addr_lower for city in indian_cities)
-                
-                # Check for US state/city
-                has_us_location = any(state in addr_lower for state in us_states) or \
-                                  any(city in addr_lower for city in us_cities)
-                
-                # Check for state abbreviation + ZIP (US pattern)
-                has_state_zip = bool(re.search(r'\b[A-Z]{2}\s*\d{5}', addr))
-                
-                # Address is valid if it has:
-                # 1. Address keyword + (PIN/ZIP OR location)
-                # 2. OR PIN/ZIP + location
-                # 3. OR State abbreviation + ZIP
-                is_valid_address = False
-                
-                if has_address_keyword and (has_pin_zip or has_indian_location or has_us_location):
-                    is_valid_address = True
-                elif has_pin_zip and (has_indian_location or has_us_location):
-                    is_valid_address = True
-                elif has_state_zip:
-                    is_valid_address = True
-                elif has_address_keyword and has_address_keyword:
-                    # Has multiple address indicators - likely valid
-                    keyword_count = sum(1 for kw in address_keywords if kw in addr_lower)
-                    if keyword_count >= 2:
-                        is_valid_address = True
-                
-                if not is_valid_address:
-                    continue
-                
-                # Skip if digit ratio is too high (phone numbers, etc.)
-                digit_count = sum(c.isdigit() for c in addr)
-                if len(addr) > 0 and digit_count / len(addr) > 0.3:
-                    continue
-                
-                # Clean up: truncate at common end-of-address indicators
-                truncate_patterns = [
-                    r'\s+home\s+',
-                    r'\s+menu\s+',
-                    r'\s+blog\s+',
-                    r'\s+contact\s+us',
-                    r'\s+about\s+us',
-                    r'\s+services\s+',
-                    r'\s+products\s+',
-                    r'\s+more\s+pages',
-                    r'\s+unlimited\s+',
-                    r'\s+free\s+',
-                    r'\s+webinar\s+',
-                    r'\s+online\s+',
-                    r'\s+click\s+',
-                    r'\s+learn\s+',
-                    r'\s+read\s+',
-                    r'\s+phone\s*:',
-                    r'\s+email\s*:',
-                    r'\s+tel\s*:',
-                    r'\s+fax\s*:',
-                ]
-                
-                for tp in truncate_patterns:
-                    match = re.search(tp, addr_lower)
-                    if match:
-                        addr = addr[:match.start()].strip()
-                        break
-                
-                # Remove trailing punctuation
-                addr = addr.rstrip('.,;:')
-                
-                # Final length check after truncation
-                if len(addr) >= 15:
-                    valid_addresses.append(addr)
-                    
-            except Exception:
+        for addr in potential:
+            addr = addr.strip()
+            addr_lower = addr.lower()
+            
+            # Minimum length
+            if len(addr) < 20:
                 continue
-                
+            
+            # Must have PIN/ZIP
+            has_pin = bool(re.search(r'\b\d{6}\b', addr))  # Indian PIN
+            has_zip = bool(re.search(r'\b\d{5}\b', addr))  # US ZIP
+            
+            if not (has_pin or has_zip):
+                continue
+            
+            # Should have address keyword OR Indian location
+            has_keyword = any(kw in addr_lower for kw in address_keywords)
+            has_location = any(loc in addr_lower for loc in indian_locations)
+            
+            if not (has_keyword or has_location):
+                continue
+            
+            # Must NOT have blacklist words
+            if any(bl in addr_lower for bl in blacklist):
+                continue
+            
+            # Clean up
+            addr = addr.strip().rstrip('.,;:')
+            
+            valid_addresses.append(addr)
+            
     except Exception:
         pass
     
-    # Deduplicate with smarter matching
     return deduplicate_addresses(valid_addresses)
-
 
 def deduplicate_addresses(addresses: list) -> list:
     """
@@ -1482,40 +1351,126 @@ def deduplicate_addresses(addresses: list) -> list:
 
 
 def clean_address_list(addresses: list) -> list:
-    """Clean and deduplicate addresses."""
+    """
+    Clean and deduplicate addresses.
+    Flexible validation for Indian, US, and international formats.
+    """
     if not addresses:
         return []
     
-    # Filter out obviously invalid entries
     filtered = []
+    
+    # Words that should NOT appear in physical addresses
+    invalid_words = [
+        'association', 'college', 'university', 'school', 'hospital',
+        'professor', 'doctor', 'training', 'faculty', 'speaker',
+        'director', 'president', 'fellow', 'textbook', 'published',
+        'articles', 'teaches', 'courses', 'medicine', 'pediatrics',
+        'clinical', 'copyright', 'reserved', 'privacy', 'terms',
+        'cookie', 'disclaimer', 'subscribe', 'newsletter', 'download',
+        'facebook', 'twitter', 'linkedin', 'instagram', 'youtube'
+    ]
+    
+    # Address indicator keywords (positive signals)
+    address_keywords = [
+        # Buildings/Structures
+        'floor', 'tower', 'block', 'building', 'complex', 'plaza',
+        'mall', 'center', 'centre', 'park', 'house', 'office',
+        'suite', 'unit', 'shop', 'flat', 'plot', 'no.', 'no ',
+        # Indian specific
+        'nagar', 'colony', 'society', 'chowk', 'marg', 'road', 'rd',
+        'gali', 'sector', 'phase', 'vihar', 'enclave', 'garden',
+        'bazar', 'bazaar', 'market', 'near', 'opp', 'opposite', 
+        'behind', 'beside', 'cross', 'main', 'layout', 'extension',
+        'bh.', 'nr.', 'nr ', 'c.t.m', 'ctm',
+        # US/Western
+        'street', 'st.', 'st ', 'avenue', 'ave', 'drive', 'dr.',
+        'lane', 'ln', 'boulevard', 'blvd', 'highway', 'hwy',
+        'court', 'ct', 'way', 'place', 'pl', 'square', 'sq',
+        'terrace', 'parkway', 'circle', 'route'
+    ]
+    
+    # Location indicators (cities/states/countries)
+    location_indicators = [
+        # Indian cities
+        'ahmedabad', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
+        'chennai', 'hyderabad', 'pune', 'kolkata', 'jaipur',
+        'surat', 'vadodara', 'gandhinagar', 'rajkot', 'indore',
+        'lucknow', 'noida', 'gurgaon', 'gurugram', 'chandigarh',
+        'amraiwadi', 'bopal', 'satellite', 'navrangpura',
+        # Indian states
+        'gujarat', 'maharashtra', 'karnataka', 'tamil nadu',
+        'telangana', 'rajasthan', 'uttar pradesh', 'haryana',
+        'punjab', 'west bengal', 'madhya pradesh', 'kerala',
+        # Countries
+        'india', 'usa', 'uk', 'canada', 'australia'
+    ]
+    
     for addr in addresses:
-        if isinstance(addr, str):
-            addr = addr.strip()
-            if addr and len(addr) >= 15:
-                # Quick sanity checks
-                addr_lower = addr.lower()
-                
-                # Skip if it's clearly not an address
-                skip_phrases = [
-                    'years of experience',
-                    'years mastering',
-                    'building a career',
-                    'roamed the earth',
-                    'fast-paced world',
-                    'wall street',
-                    'acute-care',
-                    'home-care',
-                    'leadership',
-                    'clinical roles',
-                ]
-                
-                should_skip = any(phrase in addr_lower for phrase in skip_phrases)
-                
-                if not should_skip:
-                    filtered.append(addr)
+        if not isinstance(addr, str):
+            continue
+            
+        addr = addr.strip()
+        addr_lower = addr.lower()
+        
+        # Length check (flexible)
+        if len(addr) < 15 or len(addr) > 300:
+            continue
+        
+        # Must NOT contain invalid words
+        has_invalid = False
+        for word in invalid_words:
+            if word in addr_lower:
+                has_invalid = True
+                break
+        
+        if has_invalid:
+            continue
+        
+        # Check for positive indicators
+        has_pin = bool(re.search(r'\b\d{6}\b', addr))           # Indian PIN (6 digits)
+        has_zip = bool(re.search(r'\b\d{5}(?:-\d{4})?\b', addr)) # US ZIP (5 or 9 digits)
+        has_keyword = any(kw in addr_lower for kw in address_keywords)
+        has_location = any(loc in addr_lower for loc in location_indicators)
+        has_number = bool(re.search(r'\d', addr))               # Has any digit
+        has_comma = ',' in addr                                  # Has comma (structure)
+        word_count = len(addr.split())
+        
+        # Flexible validation rules (pass ANY of these):
+        is_valid = False
+        
+        # Rule 1: Has PIN or ZIP code (strong indicator)
+        if has_pin or has_zip:
+            is_valid = True
+        
+        # Rule 2: Has address keyword + location name
+        elif has_keyword and has_location:
+            is_valid = True
+        
+        # Rule 3: Has keyword + number + comma (structured address)
+        elif has_keyword and has_number and has_comma:
+            is_valid = True
+        
+        # Rule 4: Has location + comma + reasonable length
+        elif has_location and has_comma and word_count >= 4:
+            is_valid = True
+        
+        # Rule 5: Has multiple keywords (very likely an address)
+        elif sum(1 for kw in address_keywords if kw in addr_lower) >= 2:
+            is_valid = True
+        
+        if is_valid:
+            # Clean up the address
+            addr = addr.strip().rstrip('.,;:|')
+            
+            # Remove email artifacts
+            addr = re.sub(r'$$email.*?$$', '', addr)
+            addr = re.sub(r'\s+', ' ', addr).strip()
+            
+            if len(addr) >= 15:  # Still valid length after cleaning
+                filtered.append(addr)
     
     return deduplicate_addresses(filtered)
-
 
 # ---------------- Smart Chunking ----------------
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
