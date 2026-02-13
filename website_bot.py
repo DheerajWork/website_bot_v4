@@ -273,6 +273,38 @@ def clean_phone_list(phones: list) -> list:
     return cleaned
 
 
+def normalize_social_url(url: str) -> str:
+    """
+    Normalize social URLs:
+    - remove trailing \ and /
+    - fix double slashes in path
+    - preserve https://
+    """
+    if not url or not isinstance(url, str):
+        return ""
+
+    try:
+        url = url.strip().rstrip("\\/ ")
+
+        parsed = urllib.parse.urlparse(url)
+
+        clean_path = re.sub(r'/+', '/', parsed.path)
+
+        if clean_path != "/" and clean_path.endswith("/"):
+            clean_path = clean_path.rstrip("/")
+
+        return urllib.parse.urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            clean_path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
+    except Exception:
+        return url
+
+
 # ---------------- Fast Requests + Firecrawl Fetch ----------------
 def fetch_page(url: str) -> str:
     """
@@ -412,7 +444,9 @@ def extract_social_links_from_html(html):
                                 continue
                             # Validate it's a proper URL
                             if href.startswith("http") or href.startswith("//"):
-                                social[platform] = href if href.startswith("http") else "https:" + href
+                                # social[platform] = href if href.startswith("http") else "https:" + href
+                                raw = href if href.startswith("http") else "https:" + href
+                                social[platform] = normalize_social_url(raw)
                                 break
         
         # Method 2: Check data attributes (data-href, data-url, etc.)
@@ -425,10 +459,9 @@ def extract_social_links_from_html(html):
                     if not social[platform]:
                         for pattern in patterns:
                             if pattern in href:
-                                if original_href.startswith("http"):
-                                    social[platform] = original_href
-                                elif original_href.startswith("//"):
-                                    social[platform] = "https:" + original_href
+                                if original_href.startswith("http") or original_href.startswith("//"):
+                                    raw = original_href if original_href.startswith("http") else "https:" + original_href
+                                    social[platform] = normalize_social_url(raw)
                                 break
         
         # Method 3: Check aria-label and title attributes on links
@@ -455,9 +488,10 @@ def extract_social_links_from_html(html):
                     for keyword in keywords:
                         if keyword in aria_label or keyword in title:
                             if href.startswith("http"):
-                                social[platform] = href
+                                social[platform] = normalize_social_url(href)
                             elif href.startswith("//"):
-                                social[platform] = "https:" + href
+                                social[platform] = normalize_social_url("https:" + href)
+
                             break
         
         # Method 4: Check for social icons (font-awesome, etc.)
@@ -483,7 +517,8 @@ def extract_social_links_from_html(html):
                             href = parent_a.get("href")
                             if href and not href.startswith("javascript:") and href != "#":
                                 if href.startswith("http") or href.startswith("//"):
-                                    social[platform] = href if href.startswith("http") else "https:" + href
+                                    raw = href if href.startswith("http") else "https:" + href
+                                    social[platform] = normalize_social_url(raw)
                                     break
                     if social[platform]:
                         break
@@ -498,7 +533,7 @@ def extract_social_links_from_html(html):
                             # Try to extract URL from onclick
                             url_match = re.search(r'(https?://[^\s\'"<>]+' + re.escape(pattern) + r'[^\s\'"<>]*)', onclick)
                             if url_match:
-                                social[platform] = url_match.group(1)
+                                social[platform] = normalize_social_url(url_match.group(1))
                                 break
         
         # Method 6: Look in JSON-LD structured data
@@ -529,7 +564,7 @@ def extract_social_links_from_html(html):
                     for pattern in patterns:
                         if pattern in content_lower:
                             if content.startswith("http"):
-                                social[platform] = content
+                                social[platform] = normalize_social_url(content)
                                 break
         
         # Method 8: Look for social widgets/embeds
@@ -539,7 +574,7 @@ def extract_social_links_from_html(html):
             for widget in fb_widgets:
                 href = widget.get("data-href") or widget.get("data-url")
                 if href and "facebook.com" in href.lower():
-                    social["Facebook"] = href
+                    social["Facebook"] = normalize_social_url(href)
                     break
         
         # Method 9: Search in all text for social URLs
@@ -553,11 +588,14 @@ def extract_social_links_from_html(html):
                     for match in matches:
                         # Skip share links
                         if "share" not in match.lower() and "sharer" not in match.lower():
-                            social[platform] = match.rstrip('.,;:')
+                            social[platform] = normalize_social_url(match)
                             break
                     if social[platform]:
                         break
-        
+        for k in social:
+            if social[k]:
+                social[k] = normalize_social_url(social[k])
+
     except Exception as e:
         print(f"Error extracting social links: {e}")
     
@@ -586,7 +624,7 @@ def _extract_social_from_jsonld(data, social, patterns):
             if not social[platform]:
                 for pattern in platform_patterns:
                     if pattern in url_lower:
-                        social[platform] = url
+                        social[platform] = normalize_social_url(url)
                         break
     
     # Check other common properties
@@ -598,7 +636,7 @@ def _extract_social_from_jsonld(data, social, patterns):
                 if not social[platform]:
                     for pattern in platform_patterns:
                         if pattern in value.lower():
-                            social[platform] = value
+                            social[platform] = normalize_social_url(value)
                             break
         elif isinstance(value, dict):
             social = _extract_social_from_jsonld(value, social, patterns)
@@ -611,7 +649,7 @@ def _extract_social_from_jsonld(data, social, patterns):
                         if not social[platform]:
                             for pattern in platform_patterns:
                                 if pattern in item.lower():
-                                    social[platform] = item
+                                    social[platform] = normalize_social_url(item)
                                     break
     
     # Check nested objects
@@ -792,10 +830,11 @@ def extract_theme_colors(html, base_url=None):
         
         # Method 7: Analyze most frequent non-neutral colors in CSS (FIXED REGEX)
         all_colors_in_css = re.findall(
-            r'#[0-9a-fA-F]{3,6}\b|rgb$[^)]+$|rgba$[^)]+$|hsl$[^)]+$|hsla$[^)]+$',
-            all_css
+            r'#[0-9a-fA-F]{3,6}\b|rgba?\([^)]+\)|hsla?\([^)]+\)',
+            all_css,
+            re.IGNORECASE
         )
-        
+
         color_frequency = Counter()
         for c in all_colors_in_css:
             normalized = normalize_color(c)
@@ -1106,7 +1145,11 @@ def extract_color_from_style(style_string, property_name):
             return ""
         
         # Try to find a color value (FIXED REGEX)
-        color_match = re.match(r'(#[0-9a-fA-F]{3,8}|rgb[a]?$[^)]+$|hsl[a]?$[^)]+$|[a-z]+)', value)
+        color_match = re.match(
+            r'(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|[a-z]+)',
+            value,
+            re.IGNORECASE
+        )
         if color_match:
             return normalize_color(color_match.group(1))
     
@@ -1159,10 +1202,8 @@ def extract_all_phones(text: str) -> list:
     
     # Safe patterns for phone extraction (FIXED REGEX)
     patterns = [
-        r'\+?\d{1,4}[\s.-]?$?\d{1,4}$?[\s.-]?\d{1,4}[\s.-]?\d{1,9}',
-        r'\+?\d[\d\s()-]{8,15}',
-        r'$\d{3}$\s*\d{3}[\s.-]?\d{4}',
-        r'\d{3}[\s.-]\d{3}[\s.-]\d{4}',
+        r'\+?\d[\d\s().-]{8,15}',
+        r'\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b',
         r'\+\d{1,3}\s?\d{4,5}\s?\d{4,6}',
     ]
     
@@ -1740,7 +1781,7 @@ def rag_extract(chunks, site_url):
             for b in range(0, len(chunks), BATCH):
                 batch = chunks[b:b+BATCH]
                 emb = get_embeddings(batch)
-                
+            
                 # Create safe IDs
                 ids = [f"chunk_{b+i}_{hash(site_url) % 10000}" for i in range(len(batch))]
                 metas = [{"chunk": b+i} for i in range(len(batch))]
@@ -2039,3 +2080,4 @@ if __name__ == "__main__":
 
     print("\n\n✅ Final Extracted Data:")
     print(json.dumps(data, indent=2, ensure_ascii=False))
+    
