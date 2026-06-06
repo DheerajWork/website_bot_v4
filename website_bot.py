@@ -1752,7 +1752,7 @@ def rag_extract(chunks, site_url):
         clean_texts = [str(t)[:8000] for t in texts]
         try:
             resp = openai_client.embeddings.create(
-                model="text-embedding-3-large",
+                model="text-embedding-3-small",
                 input=clean_texts
             )
             return [item.embedding for item in resp.data]
