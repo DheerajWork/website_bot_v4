@@ -30,29 +30,28 @@ if not OPENAI_KEY:
 if not FIRECRAWL_KEY:
     print("⚠️ FIRECRAWL_API_KEY not found, Firecrawl fallback disabled")
 
-# ---------------- ChromaDB & OpenAI ----------------
+# ---------------- Qdrant & OpenAI ----------------
 try:
-    from chromadb import PersistentClient
-    from chromadb.utils import embedding_functions
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
     from openai import OpenAI
 except Exception as e:
     print("Import error:", e)
     raise SystemExit(f"Error importing modules: {e}")
 
-# Initialize NEW persistent Chroma client
+QDRANT_HOST = os.getenv("QDRANT_HOST")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+
+# Initialize Qdrant client
 try:
-    chroma_client = PersistentClient(path="./chroma")
-    print("✅ Chroma client initialized at ./chroma")
+    qdrant_client = QdrantClient(url=QDRANT_HOST, api_key=QDRANT_API_KEY)
+    print("✅ Qdrant client initialized")
 except Exception as err:
-    print("⚠️ Could not initialize Chroma client.")
-    print("Chroma error:", str(err))
-    chroma_client = None
+    print("⚠️ Could not initialize Qdrant client.")
+    print("Qdrant error:", str(err))
+    qdrant_client = None
 
 openai_client = OpenAI(api_key=OPENAI_KEY)
-openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=OPENAI_KEY,
-    model_name="text-embedding-3-large"
-)
 
 
 # ---------------- Helper Functions ----------------
@@ -1733,7 +1732,6 @@ def sanitize_collection_name(url):
             name = 'c_' + name
         if not name:
             name = "default_collection"
-        # ChromaDB name limit is 63 characters
         return name[:63]
     except Exception:
         return "default_collection"
@@ -1741,68 +1739,70 @@ def sanitize_collection_name(url):
 
 def rag_extract(chunks, site_url):
     """
-    If Chroma is available we index/query there.
+    If Qdrant is available we index/query there.
     If not available, fall back to joining top chunks as context.
     """
     context = ""
-    
-    if chroma_client:
+
+    def get_embeddings(texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        if not isinstance(texts, list):
+            texts = [str(texts)]
+        clean_texts = [str(t)[:8000] for t in texts]
+        try:
+            resp = openai_client.embeddings.create(
+                model="text-embedding-3-large",
+                input=clean_texts
+            )
+            return [item.embedding for item in resp.data]
+        except Exception as e:
+            print("❌ Embedding ERROR:", e)
+            raise
+
+    if qdrant_client:
         try:
             cname = sanitize_collection_name(site_url)
-            coll = chroma_client.get_or_create_collection(
-                name=cname,
-                embedding_function=openai_ef,
-                metadata={"dimension": 3072}
+
+            # Recreate collection for fresh data each run
+            try:
+                qdrant_client.delete_collection(cname)
+            except Exception:
+                pass
+            qdrant_client.create_collection(
+                collection_name=cname,
+                vectors_config=VectorParams(size=3072, distance=Distance.COSINE)
             )
-            
-            def get_embeddings(texts):
-                if isinstance(texts, str):
-                    texts = [texts]
-                if not isinstance(texts, list):
-                    texts = [str(texts)]
 
-                clean_texts = [str(t)[:8000] for t in texts]
-
-                try:
-                    resp = openai_client.embeddings.create(
-                        model="text-embedding-3-large",
-                        input=clean_texts
-                    )
-                    return [item.embedding for item in resp.data]
-                except Exception as e:
-                    print("❌ Embedding ERROR:", e)
-                    raise
-
-            print(f"✅ Using Chroma collection: {cname}")
+            print(f"✅ Using Qdrant collection: {cname}")
             BATCH = 8
-
             chunks = [str(c).strip() for c in chunks if str(c).strip()]
 
             for b in range(0, len(chunks), BATCH):
                 batch = chunks[b:b+BATCH]
                 emb = get_embeddings(batch)
-            
-                # Create safe IDs
-                ids = [f"chunk_{b+i}_{hash(site_url) % 10000}" for i in range(len(batch))]
-                metas = [{"chunk": b+i} for i in range(len(batch))]
-                coll.add(
-                    documents=batch,
-                    metadatas=metas,
-                    ids=ids,
-                    embeddings=emb 
-                )
+                points = [
+                    PointStruct(
+                        id=b + i,
+                        vector=emb[i],
+                        payload={"document": batch[i], "chunk": b + i}
+                    )
+                    for i in range(len(batch))
+                ]
+                qdrant_client.upsert(collection_name=cname, points=points)
 
-            res = coll.query(
-                query_texts=["company name, about us, services, contact information, email, phone, office address, location"],
-                n_results=6
+            query_emb = get_embeddings(
+                "company name, about us, services, contact information, email, phone, office address, location"
+            )[0]
+            results = qdrant_client.search(
+                collection_name=cname,
+                query_vector=query_emb,
+                limit=6
             )
-            docs_list = res.get("documents", [])
-            if docs_list and isinstance(docs_list, list):
-                context = " ".join(docs_list[0]) if docs_list[0] else ""
-            else:
-                context = " ".join(chunks[:6])
+            docs = [hit.payload.get("document", "") for hit in results]
+            context = " ".join(docs) if docs else " ".join(chunks[:6])
         except Exception as e:
-            print("⚠️ Chroma operation failed, falling back. Error:", str(e))
+            print("⚠️ Qdrant operation failed, falling back. Error:", str(e))
             context = " ".join(chunks[:6])
     else:
         context = " ".join(chunks[:6])
