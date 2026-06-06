@@ -1869,7 +1869,6 @@ Website content to extract from:
         r = openai_client.chat.completions.create(
             model="gpt-5-nano",
             messages=[{"role":"user","content":prompt}],
-            temperature=0
         )
 
         out = r.choices[0].message.content
